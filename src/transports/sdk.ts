@@ -6,7 +6,7 @@ import {
   unsubscribedCodes,
 } from "centrifuge";
 
-import { FeedError, redact } from "../http.js";
+import { FeedError, redactedError } from "../http.js";
 import { asFeedUpdate } from "../message.js";
 import type { Session, Transport, TransportHooks } from "./types.js";
 
@@ -80,7 +80,7 @@ export function sdkTransport(websocket?: unknown) {
       client.on("error", (ctx) => {
         // Token errors come from our own getToken, and the feed has reported those already.
         if (!conn.active || TOKEN_ERRORS.has(ctx.type)) return;
-        hooks.error(new FeedError(redact(`centrifugo ${ctx.type} error: ${ctx.error.message}`)));
+        hooks.error(redactedError(ctx.error.message, `centrifugo ${ctx.type} error`));
       });
 
       // Fossil delta needs a positioned, recoverable subscription.

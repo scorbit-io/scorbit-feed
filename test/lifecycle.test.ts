@@ -89,7 +89,9 @@ describe("listener isolation", () => {
   });
 
   it("still DELETEs on stop() when a status listener throws on `ended`", async () => {
-    const { api, feed, ended } = setup();
+    const rethrown: (() => void)[] = [];
+    vi.spyOn(globalThis, "queueMicrotask").mockImplementation((fn) => void rethrown.push(fn));
+    const { api, feed, ended, errors } = setup();
     queueStream(api);
     api.queue("delete", new Response(null, { status: 204 }));
     feed.on("status", (status) => {
@@ -101,6 +103,10 @@ describe("listener isolation", () => {
     expect(api.count("delete")).toBe(1);
     expect(ended).toEqual(["stopped"]);
     expect(vi.getTimerCount()).toBe(0);
+    // Past the end there is no `error` event to carry it: it is re-thrown outside instead.
+    expect(errors).toEqual([]);
+    expect(rethrown).toHaveLength(1);
+    expect(() => rethrown[0]!()).toThrow("listener bug");
   });
 
   it("ends exactly once when an `ended` or `status` listener calls stop() or start()", async () => {
@@ -226,10 +232,11 @@ describe("review fixes", () => {
   });
 
   it("still deletes on stop() after the feed ended locally, and retries a failed delete", async () => {
-    const { api, feed, ended } = setup({
-      initialTokens: { ...CREATED_SSE, sse_endpoint: "http://centrifugo.example/uni_sse" },
-    });
+    // No endpoint known anywhere: the feed ends locally after its first heartbeat.
+    const { api, feed, ended } = setup({ initialTokens: undefined });
+    api.queue("heartbeat", json(200, heartbeatSse(2)));
     feed.start();
+    await flush();
     expect(ended).toEqual(["stopped"]);
     api.queue("delete", json(500), new Response(null, { status: 204 }));
     await expect(feed.stop()).rejects.toMatchObject({ status: 500 });
@@ -327,7 +334,7 @@ describe("URL checks", () => {
     },
   );
 
-  it("ends the feed with an error, not an unhandled rejection, when the server sends a bad endpoint", async () => {
+  it("treats a heartbeat with a bad endpoint as a failed refresh, never connecting to it", async () => {
     const { api, feed, errors, ended } = setup();
     queueStream(api);
     api.queue(
@@ -336,10 +343,10 @@ describe("URL checks", () => {
     );
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(errors[0]!.message).toMatch(/endpoint must use https:/);
-    expect(ended).toEqual(["stopped"]);
-    expect(api.count("delete")).toBe(0);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(errors[0]!.message).toBe("malformed heartbeat response: bad sse_endpoint");
+    expect(ended).toEqual([]);
+    expect(api.count("sse")).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it("never lets a refresh reject: an unexpected failure becomes an error event", async () => {

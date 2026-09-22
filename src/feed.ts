@@ -9,11 +9,12 @@ import {
   checkBaseUrl,
   checkEndpoint,
   feedUrl,
-  redact,
+  redactedError,
   request,
 } from "./http.js";
 import { sdkTransport } from "./transports/sdk.js";
 import { sseTransport } from "./transports/sse.js";
+import { tokensProblem } from "./validate.js";
 import type { Transport as TransportImpl, TransportHooks } from "./transports/types.js";
 import type {
   EndReason,
@@ -46,8 +47,6 @@ function reconnectable(code: number | undefined): boolean {
 }
 
 const backoff = (attempt: number) => Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
-
-const asError = (err: unknown) => (err instanceof Error ? err : new FeedError(String(err)));
 
 export interface AttachOptions {
   feedId: string;
@@ -114,6 +113,8 @@ export class Feed extends Emitter<FeedEvents> {
   private started = false;
   private finished = false;
   private endReason: EndReason | undefined;
+  // Set once end() has delivered `ended`: nothing is delivered after that.
+  private silenced = false;
   private deletion: Promise<void> | undefined;
   // Never assumed fixed: every update is compared against the last set seen.
   private machineSet: string[];
@@ -152,8 +153,14 @@ export class Feed extends Emitter<FeedEvents> {
   start(): void {
     if (this.started || this.finished) return;
     this.started = true;
-    this.setStatus("connecting");
-    if (this.initialTokens && this.apply(this.initialTokens)) return;
+    if (!this.setStatus("connecting")) return;
+    if (
+      this.initialTokens &&
+      !tokensProblem(this.initialTokens) &&
+      this.apply(this.initialTokens)
+    ) {
+      return;
+    }
     this.reopenPending = true;
     void this.refresh();
   }
@@ -183,18 +190,33 @@ export class Feed extends Emitter<FeedEvents> {
     }
   }
 
-  // A throwing listener must not break the lifecycle: report it as an error event.
+  // A throwing listener must not break the lifecycle: report it, redacted, as an error event.
   protected override listenerFailed(event: keyof FeedEvents, err: unknown): void {
-    if (event === "error") super.listenerFailed(event, err);
-    else this.emit("error", asError(err));
+    // After the end there is no error event to carry it: re-throw it outside instead.
+    if (event === "error" || this.finished) super.listenerFailed(event, err);
+    else this.emit("error", redactedError(err));
+  }
+
+  protected override deliverable(): boolean {
+    return !this.silenced;
   }
 
   // --- lifecycle --------------------------------------------------------------
 
-  private setStatus(status: FeedStatus): void {
-    if (this.finished || status === this.currentStatus) return;
+  /**
+   * Every emit inside the feed goes through here. A listener may call stop()
+   * synchronously, so the caller must do nothing more when this returns false.
+   */
+  private emitAlive<K extends keyof FeedEvents>(event: K, value: FeedEvents[K]): boolean {
+    this.emit(event, value);
+    return !this.finished;
+  }
+
+  /** False once the feed has finished during the emit. */
+  private setStatus(status: FeedStatus): boolean {
+    if (status === this.currentStatus) return true;
     this.currentStatus = status;
-    this.emit("status", status);
+    return this.emitAlive("status", status);
   }
 
   private end(reason: EndReason): void {
@@ -207,6 +229,7 @@ export class Feed extends Emitter<FeedEvents> {
     this.currentStatus = "ended";
     this.emit("status", "ended");
     this.emit("ended", { reason });
+    this.silenced = true;
   }
 
   private clearTimer(): void {
@@ -224,15 +247,15 @@ export class Feed extends Emitter<FeedEvents> {
 
   // A failed refresh leaves the status alone: a live connection stays live on the tokens it holds.
   private fail(error: Error, retryAfterMs = 0): void {
-    this.emit("error", error);
+    if (!this.emitAlive("error", error)) return;
     this.refreshAttempts += 1;
     this.schedule(Math.max(backoff(this.refreshAttempts), retryAfterMs));
   }
 
   /** The connection dropped. Reopen at once only after a stable session; otherwise back off. */
   private dropped(code: number | undefined, error?: Error): void {
-    if (error) this.emit("error", error);
-    this.setStatus("reconnecting");
+    if (error && !this.emitAlive("error", error)) return;
+    if (!this.setStatus("reconnecting")) return;
     const stable = this.liveSince !== undefined && Date.now() - this.liveSince >= STABLE_MS;
     this.liveSince = undefined;
     if (stable) this.dropAttempts = 0;
@@ -255,10 +278,7 @@ export class Feed extends Emitter<FeedEvents> {
     if (this.inflight) return this.inflight;
     this.clearTimer();
     this.inflight = this.heartbeat()
-      .catch((err: unknown) => {
-        this.emit("error", asError(err));
-        return !this.finished;
-      })
+      .catch((err: unknown) => this.emitAlive("error", redactedError(err)))
       .finally(() => {
         this.inflight = undefined;
       });
@@ -283,25 +303,29 @@ export class Feed extends Emitter<FeedEvents> {
         this.end(reason);
         return false;
       }
-      const message = err instanceof Error ? err.message : String(err);
       const retryAfter = err instanceof FeedHttpError ? (err.retryAfter ?? 0) : 0;
-      this.fail(new FeedError(redact(`heartbeat failed: ${message}`)), retryAfter * 1000);
+      this.fail(redactedError(err, "heartbeat failed"), retryAfter * 1000);
       return true;
     }
     if (this.finished) return false;
-    if (!this.apply(tokens)) {
-      this.fail(new FeedError("heartbeat response had no usable tokens or interval"));
-    }
+    // A malformed answer is a failed refresh, retried with backoff, never trusted.
+    const problem =
+      tokensProblem(tokens) ??
+      (this.opened &&
+      this.transportName === "sdk" &&
+      !tokens.transport &&
+      !tokens.subscription_token
+        ? "subscription_token"
+        : undefined);
+    if (problem) this.fail(new FeedError(`malformed heartbeat response: bad ${problem}`));
+    else this.apply(tokens);
     return !this.finished;
   }
 
-  /** Adopt a token set: (re)connect as needed and schedule the next refresh. */
+  /** Adopt a validated token set: (re)connect as needed and schedule the next refresh. */
   private apply(tokens: FeedTokens): boolean {
-    // Server-supplied and per-feed: never a compiled-in constant. A response
-    // without a usable interval is a failed refresh, not something to trust.
-    const interval = Number(tokens.heartbeat_interval);
-    if (!(interval > 0) || !tokens.connection_token) return false;
-
+    // Server-supplied and per-feed: never a compiled-in constant.
+    const interval = tokens.heartbeat_interval;
     this.tokens = tokens;
     this.refreshAttempts = 0;
     // The heartbeat response may not carry the endpoint yet: keep the last known one.
@@ -329,32 +353,33 @@ export class Feed extends Emitter<FeedEvents> {
       else this.transport.refreshed(session);
     } catch (err) {
       // A connection that cannot even be attempted ends the feed locally; the server keeps it.
-      this.emit("error", new FeedError(redact(asError(err).message)));
-      this.end("stopped");
+      if (this.emitAlive("error", redactedError(err))) this.end("stopped");
       return true;
     }
+    // Opening may have emitted synchronously, and a listener may have stopped the feed.
+    if (this.finished) return true;
     this.opened = true;
     this.reopenPending = false;
     this.schedule(interval * 1000);
     return true;
   }
 
-  private trackMachines(update: FeedUpdate): void {
+  private trackMachines(update: FeedUpdate): boolean {
     const next = update.payload.machines.map((machine) => machine.machine_uuid);
     const before = new Set(this.machineSet);
     const after = new Set(next);
     const added = next.filter((uuid) => !before.has(uuid));
     const removed = this.machineSet.filter((uuid) => !after.has(uuid));
     this.machineSet = next;
-    if (added.length || removed.length) this.emit("machines", { added, removed, machines: next });
+    if (!added.length && !removed.length) return true;
+    return this.emitAlive("machines", { added, removed, machines: next });
   }
 
   private createTransport(name: Transport): TransportImpl {
     const hooks: TransportHooks = {
       // Transports stop calling these once closed, and end() closes the transport.
       update: (update) => {
-        this.trackMachines(update);
-        this.emit("update", update);
+        if (this.trackMachines(update)) this.emitAlive("update", update);
       },
       live: () => {
         if (this.currentStatus !== "live") this.liveSince = Date.now();
@@ -366,7 +391,7 @@ export class Feed extends Emitter<FeedEvents> {
       },
       disconnected: (code) => this.dropped(code),
       lost: (error) => this.dropped(undefined, error),
-      error: (error) => this.emit("error", error),
+      error: (error) => this.emitAlive("error", redactedError(error)),
       latest: () => {
         // apply() stores the tokens before it creates a transport.
         const tokens = this.tokens as FeedTokens;

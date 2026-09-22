@@ -284,7 +284,7 @@ describe("scorbit-feed agent (create mode)", () => {
 });
 
 describe("scorbit-feed agent cleanup", () => {
-  it("deletes a feed it created that ended locally, once, and exits 1", async () => {
+  it("deletes, with the key, a feed whose create response it cannot use, and exits 1", async () => {
     const h = harness({ SCORBIT_API_KEY: API_KEY });
     h.api.queue(
       "create",
@@ -293,11 +293,34 @@ describe("scorbit-feed agent cleanup", () => {
     h.api.queue("delete", new Response(null, { status: 204 }));
     await h.run([...base, "--transport", "sse"]);
     expect(await h.exited).toBe(1);
+    expect(h.lines[0]).toBe("error: malformed create response: bad sse_endpoint");
+    const del = h.api.calls.find((c) => c.key === "delete")!;
+    expect(del.headers.Authorization).toBe(`Bearer ${API_KEY}`);
+    expect(h.api.count("delete")).toBe(1);
+    h.noSecrets();
+  });
+
+  it("deletes a feed it created that the agent ends locally, once, then exits 1", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, CREATED_SSE));
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    // The transport cannot even be opened: the feed ends locally with reason "stopped".
+    h.api.queue("sse", () => {
+      throw new Error("unreachable");
+    });
+    const { Feed } = await import("../src/feed.js");
+    const target = Feed.prototype as unknown as { createTransport: () => unknown };
+    const spy = vi.spyOn(target, "createTransport").mockImplementationOnce(() => {
+      throw new Error("no transport");
+    });
+    await h.run([...base, "--transport", "sse"]);
+    expect(await h.exited).toBe(1);
     expect(h.lines).toContain("feed ended: stopped");
     expect(h.api.count("delete")).toBe(1);
     h.signals.emit("SIGINT");
     await flush();
     expect(h.api.count("delete")).toBe(1);
+    spy.mockRestore();
     h.noSecrets();
   });
 

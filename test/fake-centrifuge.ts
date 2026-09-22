@@ -24,6 +24,8 @@ export interface FakeSubscriptionOptions {
 }
 
 export class FakeSubscription extends Events {
+  /** Emit `subscribed` from inside subscribe(), as an SDK with cached state might. */
+  static syncSubscribed = false;
   subscribeCalls = 0;
   constructor(
     readonly channel: string,
@@ -34,6 +36,7 @@ export class FakeSubscription extends Events {
 
   subscribe(): void {
     this.subscribeCalls += 1;
+    if (FakeSubscription.syncSubscribed) this.emit("subscribed", {});
   }
 }
 

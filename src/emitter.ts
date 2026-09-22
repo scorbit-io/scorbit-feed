@@ -24,12 +24,19 @@ export class Emitter<Events extends object> {
 
   protected emit<K extends keyof Events>(event: K, value: Events[K]): void {
     for (const listener of [...(this.listeners.get(event) ?? [])]) {
+      // A listener may have shut the emitter down: the rest of this delivery is dropped.
+      if (!this.deliverable()) return;
       try {
         (listener as Listener<Events[K]>)(value);
       } catch (err) {
         this.listenerFailed(event, err);
       }
     }
+  }
+
+  /** Whether events may still be delivered. */
+  protected deliverable(): boolean {
+    return true;
   }
 
   /** Where a listener's exception goes. By default it is re-thrown outside the emitter. */

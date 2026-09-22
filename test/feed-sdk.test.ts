@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AttachOptions, attachFeed } from "../src/feed.js";
 import { FeedError } from "../src/http.js";
 import type { EndReason, FeedStatus, FeedUpdate } from "../src/types.js";
-import { FakeCentrifuge } from "./fake-centrifuge.js";
+import { FakeCentrifuge, FakeSubscription } from "./fake-centrifuge.js";
 import {
   API_KEY,
   BASE_URL,
@@ -271,7 +271,7 @@ describe("sdk transport: token refresh", () => {
     api.queue("heartbeat", json(200, heartbeatSdk(3)));
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(errors[0]!.message).toMatch(/no usable tokens or interval/);
+    expect(errors[0]!.message).toBe("malformed heartbeat response: bad heartbeat_interval");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(api.count("heartbeat")).toBe(2);
     await expect(FakeCentrifuge.last.options.getToken()).resolves.toBe(jwt("conn3"));
@@ -326,7 +326,7 @@ describe("sdk transport: token refresh", () => {
     api.queue("heartbeat", () => Promise.reject("socket hang up"));
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(errors[0]!.message).toBe("heartbeat failed: socket hang up");
+    expect(errors[0]!.message).toBe("heartbeat failed: request failed: socket hang up");
   });
 });
 
@@ -427,6 +427,26 @@ describe("sdk transport: disconnects", () => {
     FakeCentrifuge.last.emit("disconnected", { code: 3503, reason: "force disconnect" });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(FakeCentrifuge.last.endpoint).toBe(moved);
+  });
+});
+
+describe("sdk transport: synchronous events while opening", () => {
+  it("does nothing more when a listener stops the feed from inside the transport's open()", async () => {
+    FakeSubscription.syncSubscribed = true;
+    try {
+      const { api, feed, ended } = setup();
+      feed.on("status", (status) => {
+        if (status === "live") void feed.stop({ deleteFeed: false });
+      });
+      feed.start();
+      await flush();
+      expect(ended).toEqual(["stopped"]);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(FakeCentrifuge.last.disconnectCalls).toBe(1);
+      expect(api.calls).toHaveLength(0);
+    } finally {
+      FakeSubscription.syncSubscribed = false;
+    }
   });
 });
 

@@ -25,6 +25,15 @@ export class FeedError extends Error {
   }
 }
 
+/**
+ * The one way an error crosses the public boundary: its message redacted, as a
+ * FeedError. The original is dropped, since it may carry a credential.
+ */
+export function redactedError(err: unknown, prefix?: string): FeedError {
+  const message = err instanceof Error ? err.message : String(err);
+  return new FeedError(redact(prefix ? `${prefix}: ${message}` : message));
+}
+
 /** A non-2xx answer from the Scorbit API. */
 export class FeedHttpError extends FeedError {
   readonly status: number;
@@ -115,12 +124,19 @@ export async function request<T>(
     Accept: "application/json",
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetchImpl(url, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await response.text();
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetchImpl(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    text = await response.text();
+  } catch (err) {
+    // A custom fetch may put the request, bearer credential included, in its error.
+    throw redactedError(err, "request failed");
+  }
   let parsed: unknown = undefined;
   if (text) {
     try {

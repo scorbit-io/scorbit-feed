@@ -1,4 +1,4 @@
-import { FeedError, type FetchLike, redact } from "../http.js";
+import { FeedError, type FetchLike, redactedError } from "../http.js";
 import { asFeedUpdate } from "../message.js";
 import { SseParser } from "../sse-parser.js";
 import type { Session, Transport, TransportHooks } from "./types.js";
@@ -22,6 +22,8 @@ export function sseTransport(fetchImpl: FetchLike) {
     };
 
     const handle = (conn: NonNullable<typeof current>, raw: string) => {
+      // A replaced stream's buffered frames must never reach the feed.
+      if (!conn.active) return;
       let message: unknown;
       try {
         message = JSON.parse(raw);
@@ -42,8 +44,10 @@ export function sseTransport(fetchImpl: FetchLike) {
         return;
       }
       if (push?.connect) hooks.live();
+      // hooks.live() may have stopped the feed, which closes this connection.
+      if (!conn.active) return;
       const update = asFeedUpdate(push?.pub?.data);
-      if (update && conn.active) hooks.update(update);
+      if (update) hooks.update(update);
     };
 
     const run = async (conn: NonNullable<typeof current>, session: Session) => {
@@ -65,17 +69,16 @@ export function sseTransport(fetchImpl: FetchLike) {
           const { done, value } = await reader.read();
           if (!conn.active) return;
           if (done) break;
+          // handle() drops every frame once this connection is no longer current.
           for (const data of parser.push(decoder.decode(value, { stream: true }))) {
             handle(conn, data);
-            if (!conn.active) return;
           }
         }
         throw new FeedError("SSE stream closed by the server");
       } catch (err) {
         if (!conn.active) return;
         close();
-        const message = err instanceof Error ? err.message : String(err);
-        hooks.lost(new FeedError(redact(`SSE connection failed: ${message}`)));
+        hooks.lost(redactedError(err, "SSE connection failed"));
       }
     };
 

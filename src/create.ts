@@ -9,6 +9,7 @@ import {
   request,
 } from "./http.js";
 import type { CreatedFeed, Transport } from "./types.js";
+import { createdProblem } from "./validate.js";
 
 export interface CreateOptions {
   /** The `sb_live_` API key. A server-side secret: never ship it to a browser. */
@@ -54,14 +55,27 @@ export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
     );
   }
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  return request<CreatedFeed>(
+  const baseUrl = checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL);
+  const created = await request<unknown>(
     fetchImpl,
-    feedUrl(checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)),
+    feedUrl(baseUrl),
     "POST",
     options.apiKey,
     // No `machines` field at all means "everything in this key's scope".
     { ...(machines ? { machines } : {}), transport: options.transport ?? "sdk" },
   );
+  const problem = createdProblem(created);
+  if (problem) {
+    // The server may have created a feed we cannot use: delete it with the key, best effort.
+    const feedId = (created as { feed_id?: unknown } | undefined)?.feed_id;
+    if (typeof feedId === "string" && feedId) {
+      await request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", options.apiKey).catch(
+        () => undefined,
+      );
+    }
+    throw new FeedError(`malformed create response: bad ${problem}`);
+  }
+  return created as CreatedFeed;
 }
 
 export type OpenOptions = CreateOptions & Pick<AttachOptions, "websocket">;
