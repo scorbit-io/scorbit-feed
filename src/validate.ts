@@ -1,4 +1,5 @@
 import { FEED_TOKEN_PREFIX, TIMER_MAX_SECONDS, checkEndpoint } from "./http.js";
+import type { FeedMachineRef } from "./types.js";
 
 // Response bodies are checked at the boundary, before anything trusts them.
 // Required here means the API always sends it: the response fields are
@@ -54,6 +55,11 @@ export function tokensProblem(body: unknown): string | undefined {
   return undefined;
 }
 
+/** A create reply's `machines`: an array of { uuid, game_name } refs. */
+export function machineRefsOk(machines: unknown): machines is FeedMachineRef[] {
+  return Array.isArray(machines) && machines.every(machineOk);
+}
+
 function machineOk(machine: unknown): boolean {
   if (!machine || typeof machine !== "object") return false;
   const m = machine as Body;
@@ -73,6 +79,6 @@ export function createdProblem(body: unknown): string | undefined {
   if (b.channel !== `data_feed:${String(b.feed_id)}`) return "channel";
   if (b.transport === "sdk" && b.ws_endpoint === undefined) return "ws_endpoint";
   if (b.transport === "sse" && b.sse_endpoint === undefined) return "sse_endpoint";
-  if (!Array.isArray(b.machines) || !b.machines.every(machineOk)) return "machines";
+  if (!machineRefsOk(b.machines)) return "machines";
   return undefined;
 }

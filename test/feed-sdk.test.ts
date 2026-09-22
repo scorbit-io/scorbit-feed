@@ -166,8 +166,10 @@ describe("sdk transport: connecting", () => {
   });
 
   it("falls back to a heartbeat when the tokens in hand are unusable", async () => {
+    // Rejected tokens are not trusted for anything, their endpoint included.
     const { api, feed } = setup({
       initialTokens: { ...CREATED_SDK, heartbeat_interval: 0 },
+      endpoint: WS_ENDPOINT,
     });
     api.queue("heartbeat", json(200, heartbeatSdk(2)));
     feed.start();

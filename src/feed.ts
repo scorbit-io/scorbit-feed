@@ -16,7 +16,7 @@ import {
 import { sdkTransport } from "./transports/sdk.js";
 import { sseTransport } from "./transports/sse.js";
 import { parsePublication } from "./message.js";
-import { tokensProblem } from "./validate.js";
+import { machineRefsOk, tokensProblem } from "./validate.js";
 import type { Transport as TransportImpl, TransportHooks } from "./transports/types.js";
 import type {
   EndReason,
@@ -52,7 +52,10 @@ const backoff = (attempt: number) => Math.min(RETRY_BASE_MS * 2 ** (attempt - 1)
 
 export interface AttachOptions {
   feedId: string;
-  /** The `sbf_` feed token. The only credential that is safe in a browser. */
+  /**
+   * The `sbf_` feed token. Unlike the API key it may reach a browser, but keep
+   * it out of URLs: hand it to the page in a response body, or use the agent.
+   */
   feedToken: string;
   /** Defaults to the production API, `https://api.scorbit.io`. Must be https, except on localhost. */
   baseUrl?: string;
@@ -133,13 +136,18 @@ export class Feed extends Emitter<FeedEvents> {
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.websocket = options.websocket;
-    this.initialTokens = options.initialTokens;
-    this.endpoint =
-      options.endpoint ?? options.initialTokens?.ws_endpoint ?? options.initialTokens?.sse_endpoint;
     this.transportName = options.transport;
-    const initial = options.initialTokens;
-    this.machineSet =
-      initial && "machines" in initial ? initial.machines.map((machine) => machine.uuid) : [];
+    // Nothing from tokens in hand is trusted (not their endpoint, not their
+    // machines) unless they pass the same check that decides whether they are
+    // applied: valid, and for this feed. Otherwise start() makes a first heartbeat.
+    const initial =
+      options.initialTokens && !this.replyProblem(options.initialTokens)
+        ? options.initialTokens
+        : undefined;
+    this.initialTokens = initial;
+    this.endpoint = options.endpoint ?? initial?.ws_endpoint ?? initial?.sse_endpoint;
+    const refs = (initial as { machines?: unknown } | undefined)?.machines;
+    this.machineSet = machineRefsOk(refs) ? refs.map((machine) => machine.uuid) : [];
   }
 
   /** The machine uuids the feed currently carries, in order. */
@@ -156,13 +164,7 @@ export class Feed extends Emitter<FeedEvents> {
     if (this.started || this.finished) return;
     this.started = true;
     if (!this.setStatus("connecting")) return;
-    if (
-      this.initialTokens &&
-      !this.replyProblem(this.initialTokens) &&
-      this.apply(this.initialTokens)
-    ) {
-      return;
-    }
+    if (this.initialTokens && this.apply(this.initialTokens)) return;
     this.reopenPending = true;
     void this.refresh();
   }
@@ -430,8 +432,8 @@ export class Feed extends Emitter<FeedEvents> {
 }
 
 /**
- * Attach to an existing feed with its `sbf_` feed token. Browser-safe. Nothing
- * connects until `start()`.
+ * Attach to an existing feed with its `sbf_` feed token. Browser-safe, but
+ * never put the token in a URL. Nothing connects until `start()`.
  */
 export function attachFeed(options: AttachOptions): Feed {
   return new Feed(options);

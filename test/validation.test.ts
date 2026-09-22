@@ -309,13 +309,57 @@ describe("heartbeat validation in the feed", () => {
       feedToken: FEED_TOKEN,
       baseUrl: BASE_URL,
       fetch: api.fetch,
+      endpoint: SSE_ENDPOINT,
       initialTokens: { ...CREATED_SSE, feed_id: "f_someone_else" },
     });
+    // Nothing from the other feed's reply is taken, not even its machines.
+    expect(feed.machines).toEqual([]);
     feed.start();
     await flush();
     expect(api.calls.map((c) => c.key)).toEqual(["heartbeat", "sse"]);
     expect(api.calls[1]!.body).toEqual({ token: jwt("sseconn2") });
+    expect(feed.machines).toEqual([]);
     await feed.stop({ deleteFeed: false });
+  });
+
+  it("never takes an endpoint from tokens in hand that belong to another feed", async () => {
+    const api = fakeApi();
+    api.queue("heartbeat", json(200, heartbeatSse(2)));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: {
+        ...CREATED_SSE,
+        feed_id: "f_someone_else",
+        sse_endpoint: "https://evil.example/uni_sse",
+      },
+    });
+    const ended: string[] = [];
+    feed.on("ended", ({ reason }) => ended.push(reason));
+    feed.start();
+    await flush();
+    // With no trusted endpoint anywhere, the feed ends locally rather than connect there.
+    expect(api.count("sse")).toBe(0);
+    expect(ended).toEqual(["stopped"]);
+  });
+
+  it("seeds its machines only from tokens in hand that it accepts", () => {
+    const own = attachFeed({ feedId: FEED_ID, feedToken: FEED_TOKEN, initialTokens: CREATED_SSE });
+    expect(own.machines).toEqual([MACHINE_A]);
+    const bad = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      initialTokens: { ...CREATED_SSE, machines: [null] as never },
+    });
+    expect(bad.machines).toEqual([]);
+    const tokensOnly = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      initialTokens: heartbeatSse(1),
+    });
+    expect(tokensOnly.machines).toEqual([]);
   });
 
   it("falls back to a heartbeat when the tokens in hand are malformed", async () => {
