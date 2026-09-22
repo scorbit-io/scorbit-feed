@@ -6,6 +6,7 @@ import {
   FeedError,
   FeedHttpError,
   type FetchLike,
+  TIMER_MAX_MS,
   checkBaseUrl,
   checkEndpoint,
   feedUrl,
@@ -14,6 +15,7 @@ import {
 } from "./http.js";
 import { sdkTransport } from "./transports/sdk.js";
 import { sseTransport } from "./transports/sse.js";
+import { parsePublication } from "./message.js";
 import { tokensProblem } from "./validate.js";
 import type { Transport as TransportImpl, TransportHooks } from "./transports/types.js";
 import type {
@@ -244,10 +246,12 @@ export class Feed extends Emitter<FeedEvents> {
 
   private schedule(ms: number): void {
     this.clearTimer();
+    // Defence in depth: validation already bounds server durations.
+    const delay = Math.min(Math.max(0, ms), TIMER_MAX_MS);
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.refresh();
-    }, ms);
+    }, delay);
   }
 
   // A failed refresh leaves the status alone: a live connection stays live on the tokens it holds.
@@ -386,8 +390,17 @@ export class Feed extends Emitter<FeedEvents> {
   private createTransport(name: Transport): TransportImpl {
     const hooks: TransportHooks = {
       // Transports stop calling these once closed, and end() closes the transport.
-      update: (update) => {
-        if (this.trackMachines(update)) this.emitAlive("update", update);
+      publication: (data) => {
+        const parsed = parsePublication(data);
+        if (!parsed) return; // not a feed update at all
+        if ("problem" in parsed) {
+          this.emitAlive(
+            "error",
+            new FeedError(`malformed publication dropped: bad ${parsed.problem}`),
+          );
+          return;
+        }
+        if (this.trackMachines(parsed.update)) this.emitAlive("update", parsed.update);
       },
       live: () => {
         if (this.currentStatus !== "live") this.liveSince = Date.now();

@@ -7,7 +7,6 @@ import {
 } from "centrifuge";
 
 import { FeedError, redactedError } from "../http.js";
-import { asFeedUpdate } from "../message.js";
 import type { Session, Transport, TransportHooks } from "./types.js";
 
 type TokenKind = "connectionToken" | "subscriptionToken";
@@ -107,8 +106,7 @@ export function sdkTransport(websocket?: unknown) {
         if (conn.active && ctx.code !== unsubscribedCodes.unsubscribeCalled) drop(ctx.code);
       });
       sub.on("publication", (ctx) => {
-        const update = asFeedUpdate(ctx.data);
-        if (conn.active && update) hooks.update(update);
+        if (conn.active) hooks.publication(ctx.data);
       });
 
       sub.subscribe();

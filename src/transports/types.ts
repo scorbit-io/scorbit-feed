@@ -1,5 +1,3 @@
-import type { FeedUpdate } from "../types.js";
-
 /** What a transport needs to connect once. */
 export interface Session {
   endpoint: string;
@@ -10,7 +8,8 @@ export interface Session {
 
 /** How a transport reports back to the feed that owns it. */
 export interface TransportHooks {
-  update(update: FeedUpdate): void;
+  /** A publication's data, unvalidated: the feed checks it before anything reads it. */
+  publication(data: unknown): void;
   live(): void;
   reconnecting(): void;
   /** The server closed the connection with a Centrifugo disconnect code. */

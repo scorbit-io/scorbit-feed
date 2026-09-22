@@ -83,13 +83,17 @@ export function checkEndpoint(endpoint: string): string {
   return endpoint;
 }
 
-/** `Retry-After` as seconds: delta-seconds or an HTTP date. */
+/** The longest delay setTimeout honours; above it, Node and browsers fire after ~1 ms. */
+export const TIMER_MAX_MS = 2 ** 31 - 1;
+export const TIMER_MAX_SECONDS = Math.floor(TIMER_MAX_MS / 1000);
+
+/** `Retry-After` as seconds (delta-seconds or an HTTP date), capped at what a timer can wait. */
 function retryAfterOf(header: string | null): number | undefined {
   if (!header) return undefined;
   const seconds = /^\d+$/.test(header.trim())
     ? Number(header)
     : (Date.parse(header) - Date.now()) / 1000;
-  return Number.isFinite(seconds) ? Math.max(0, seconds) : undefined;
+  return Number.isFinite(seconds) ? Math.min(Math.max(0, seconds), TIMER_MAX_SECONDS) : undefined;
 }
 
 export function feedUrl(baseUrl: string, feedId?: string, action?: string): string {
@@ -109,6 +113,22 @@ function detailOf(body: unknown): string | undefined {
     if (typeof detail === "string") return detail;
   }
   return undefined;
+}
+
+/**
+ * Every request that carries a credential sets `redirect: "manual"` and refuses
+ * any redirect: following one would re-send the key, feed token or JWT to
+ * wherever the Location header points.
+ */
+export const NO_REDIRECT = "manual" as const;
+
+/** A redirect the request refused (manual mode: a 3xx, or an opaque redirect in browsers). */
+export function refusedRedirect(response: Response): FeedError | undefined {
+  const redirected =
+    response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
+  return redirected
+    ? new FeedError(`refused a redirect (${response.status}); credentials are never re-sent`)
+    : undefined;
 }
 
 /** One JSON request with a bearer credential. Resolves the body, or `undefined` on 204. */
@@ -131,7 +151,10 @@ export async function request<T>(
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: NO_REDIRECT,
     });
+    const refused = refusedRedirect(response);
+    if (refused) throw refused;
     text = await response.text();
   } catch (err) {
     // A custom fetch may put the request, bearer credential included, in its error.

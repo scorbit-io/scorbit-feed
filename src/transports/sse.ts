@@ -1,5 +1,4 @@
-import { FeedError, type FetchLike, redactedError } from "../http.js";
-import { asFeedUpdate } from "../message.js";
+import { FeedError, type FetchLike, NO_REDIRECT, redactedError, refusedRedirect } from "../http.js";
 import { SseParser } from "../sse-parser.js";
 import type { Session, Transport, TransportHooks } from "./types.js";
 
@@ -46,8 +45,7 @@ export function sseTransport(fetchImpl: FetchLike) {
       if (push?.connect) hooks.live();
       // hooks.live() may have stopped the feed, which closes this connection.
       if (!conn.active) return;
-      const update = asFeedUpdate(push?.pub?.data);
-      if (update) hooks.update(update);
+      if (push?.pub) hooks.publication(push.pub.data);
     };
 
     const run = async (conn: NonNullable<typeof current>, session: Session) => {
@@ -57,8 +55,11 @@ export function sseTransport(fetchImpl: FetchLike) {
           headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
           body: JSON.stringify({ token: session.connectionToken }),
           signal: conn.abort.signal,
+          redirect: NO_REDIRECT,
         });
         if (!conn.active) return;
+        const refused = refusedRedirect(response);
+        if (refused) throw refused;
         if (!response.ok || !response.body) {
           throw new FeedError(`SSE endpoint answered ${response.status}`);
         }

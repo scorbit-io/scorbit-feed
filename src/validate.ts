@@ -1,4 +1,4 @@
-import { FEED_TOKEN_PREFIX, checkEndpoint } from "./http.js";
+import { FEED_TOKEN_PREFIX, TIMER_MAX_SECONDS, checkEndpoint } from "./http.js";
 
 // Response bodies are checked at the boundary, before anything trusts them.
 // Each check names the field that failed, never its value (it may be a token).
@@ -6,8 +6,10 @@ import { FEED_TOKEN_PREFIX, checkEndpoint } from "./http.js";
 type Body = Record<string, unknown>;
 
 const nonEmpty = (value: unknown) => typeof value === "string" && value.length > 0;
-const positive = (value: unknown) =>
-  typeof value === "number" && Number.isFinite(value) && value > 0;
+// A duration in seconds that a timer can actually wait: setTimeout clamps
+// anything above 2^31-1 ms to ~1 ms, which would turn a long wait into a storm.
+const duration = (value: unknown) =>
+  typeof value === "number" && value > 0 && value <= TIMER_MAX_SECONDS;
 
 function endpointOk(value: unknown, scheme: RegExp): boolean {
   if (typeof value !== "string" || !scheme.test(value)) return false;
@@ -25,8 +27,10 @@ export function tokensProblem(body: unknown): string | undefined {
   const b = body as Body;
   if (!nonEmpty(b.feed_id)) return "feed_id";
   if (!nonEmpty(b.connection_token)) return "connection_token";
-  if (!positive(b.heartbeat_interval)) return "heartbeat_interval";
-  if (!positive(b.token_ttl)) return "token_ttl";
+  // The channel reaches the SDK subscription: it can only be this feed's own.
+  if (b.channel !== undefined && b.channel !== `data_feed:${String(b.feed_id)}`) return "channel";
+  if (!duration(b.heartbeat_interval)) return "heartbeat_interval";
+  if (!duration(b.token_ttl)) return "token_ttl";
   if (b.transport !== undefined && b.transport !== "sdk" && b.transport !== "sse") {
     return "transport";
   }

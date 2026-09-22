@@ -6,6 +6,7 @@ export interface Call {
   method: string;
   headers: Record<string, string>;
   body: unknown;
+  redirect: RequestRedirect | undefined;
 }
 
 type Result = Response | Error | ((init: RequestInit | undefined) => Response | Promise<Response>);
@@ -37,6 +38,7 @@ export function fakeApi() {
       method,
       headers: { ...(init?.headers as Record<string, string>) },
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      redirect: init?.redirect,
     });
     const next = queues.get(key)?.shift();
     if (next === undefined) throw new Error(`unexpected ${key} call`);

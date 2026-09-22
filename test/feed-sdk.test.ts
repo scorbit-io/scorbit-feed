@@ -475,14 +475,15 @@ describe("sdk transport: connection parameters that change", () => {
     expect(updates).toEqual([UPDATE]);
   });
 
-  it("rebuilds the client when a heartbeat names a different channel", async () => {
-    const { api, feed } = setup();
+  it("keeps the client, and retries, when a heartbeat names another feed's channel", async () => {
+    const { api, feed, errors } = setup();
     api.queue("heartbeat", json(200, { ...heartbeatSdk(2), channel: "data_feed:f_other" }));
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(FakeCentrifuge.instances).toHaveLength(2);
-    expect(FakeCentrifuge.last.sub.channel).toBe("data_feed:f_other");
-    expect(FakeCentrifuge.instances[0]!.disconnectCalls).toBe(1);
+    expect(errors.map((e) => e.message)).toEqual(["malformed heartbeat response: bad channel"]);
+    expect(FakeCentrifuge.instances).toHaveLength(1);
+    expect(FakeCentrifuge.last.disconnectCalls).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it("keeps the same client when only the tokens change", async () => {
