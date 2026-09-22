@@ -109,6 +109,15 @@ describe("createdProblem (create bodies)", () => {
     ["sdk without ws_endpoint", { ...CREATED_SDK, ws_endpoint: undefined }, "ws_endpoint"],
     ["sse without sse_endpoint", { ...CREATED_SSE, sse_endpoint: undefined }, "sse_endpoint"],
     ["no machines", { ...CREATED_SSE, machines: undefined }, "machines"],
+    ["a null machine", { ...CREATED_SSE, machines: [null] }, "machines"],
+    ["a machine that is not an object", { ...CREATED_SSE, machines: ["uuid"] }, "machines"],
+    ["a machine without a uuid", { ...CREATED_SSE, machines: [{ game_name: "X" }] }, "machines"],
+    ["a machine with an empty uuid", { ...CREATED_SSE, machines: [{ uuid: "" }] }, "machines"],
+    [
+      "a numeric game_name",
+      { ...CREATED_SSE, machines: [{ uuid: MACHINE_A, game_name: 5 }] },
+      "machines",
+    ],
     [
       "sdk with only an sse_endpoint",
       { ...CREATED_SDK, ws_endpoint: undefined, sse_endpoint: SSE_ENDPOINT },
@@ -127,6 +136,8 @@ describe("createdProblem (create bodies)", () => {
   it.each([
     ["sdk", CREATED_SDK],
     ["sse", CREATED_SSE],
+    ["a machine without a game_name", { ...CREATED_SSE, machines: [{ uuid: MACHINE_A }] }],
+    ["no machines at all", { ...CREATED_SSE, machines: [] }],
   ])("accepts %s", (_label, body) => {
     expect(createdProblem(body)).toBeUndefined();
   });
@@ -258,6 +269,46 @@ describe("heartbeat validation in the feed", () => {
     expect(ended).toEqual(["stopped"]);
   });
 
+  it("retries, without applying, a heartbeat addressed to another feed", async () => {
+    const api = fakeApi();
+    const stream = sseStream();
+    api.queue("sse", (init) => stream.respond(init));
+    api.queue("heartbeat", json(200, { ...heartbeatSse(2), feed_id: "f_someone_else" }));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: CREATED_SSE,
+    });
+    const errors: string[] = [];
+    feed.on("error", (e) => errors.push(e.message));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(CREATED_SSE.heartbeat_interval * 1000);
+    expect(errors).toEqual(["malformed heartbeat response: bad feed_id"]);
+    expect(api.count("sse")).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await feed.stop({ deleteFeed: false });
+  });
+
+  it("does not connect with tokens in hand that belong to another feed", async () => {
+    const api = fakeApi();
+    api.queue("heartbeat", json(200, heartbeatSse(2)));
+    api.queue("sse", (init) => sseStream().respond(init));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: { ...CREATED_SSE, feed_id: "f_someone_else" },
+    });
+    feed.start();
+    await flush();
+    expect(api.calls.map((c) => c.key)).toEqual(["heartbeat", "sse"]);
+    expect(api.calls[1]!.body).toEqual({ token: jwt("sseconn2") });
+    await feed.stop({ deleteFeed: false });
+  });
+
   it("falls back to a heartbeat when the tokens in hand are malformed", async () => {
     const api = fakeApi();
     const stream = sseStream();
@@ -303,6 +354,42 @@ describe("redaction at the public boundary", () => {
       FEED_TOKEN,
     ).catch((e: Error) => e);
     expect(error.message).toBe("request failed: reset [redacted]");
+  });
+
+  it.each([
+    ["an `error` listener", "error"],
+    ["an `ended` listener", "ended"],
+  ] as const)("redacts what it re-throws from %s", async (_label, event) => {
+    const rethrown: (() => void)[] = [];
+    vi.spyOn(globalThis, "queueMicrotask").mockImplementation((fn) => void rethrown.push(fn));
+    const api = fakeApi();
+    api.queue("sse", (init) => sseStream().respond(init));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: CREATED_SSE,
+    });
+    feed.on(event, () => {
+      throw new Error(`listener saw ${API_KEY} ${FEED_TOKEN} ${jwt("x")}`);
+    });
+    // An update listener that throws makes an `error` event; stopping makes `ended`.
+    feed.on("status", (status) => {
+      if (status === "connecting") throw new Error("first");
+    });
+    feed.start();
+    await flush();
+    await feed.stop({ deleteFeed: false });
+    expect(rethrown).toHaveLength(1);
+    let thrown: unknown;
+    try {
+      rethrown[0]!();
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as Error).message).toBe("listener saw [redacted] [redacted] [redacted]");
+    vi.restoreAllMocks();
   });
 
   it("redacts a listener's exception before emitting it", async () => {

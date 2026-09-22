@@ -156,7 +156,7 @@ export class Feed extends Emitter<FeedEvents> {
     if (!this.setStatus("connecting")) return;
     if (
       this.initialTokens &&
-      !tokensProblem(this.initialTokens) &&
+      !this.replyProblem(this.initialTokens) &&
       this.apply(this.initialTokens)
     ) {
       return;
@@ -193,12 +193,17 @@ export class Feed extends Emitter<FeedEvents> {
   // A throwing listener must not break the lifecycle: report it, redacted, as an error event.
   protected override listenerFailed(event: keyof FeedEvents, err: unknown): void {
     // After the end there is no error event to carry it: re-throw it outside instead.
-    if (event === "error" || this.finished) super.listenerFailed(event, err);
+    if (event === "error" || this.finished) super.listenerFailed(event, redactedError(err));
     else this.emit("error", redactedError(err));
   }
 
   protected override deliverable(): boolean {
     return !this.silenced;
+  }
+
+  /** A token set's first problem, including one addressed to another feed. */
+  private replyProblem(tokens: FeedTokens): string | undefined {
+    return tokensProblem(tokens) ?? (tokens.feed_id === this.feedId ? undefined : "feed_id");
   }
 
   // --- lifecycle --------------------------------------------------------------
@@ -310,7 +315,7 @@ export class Feed extends Emitter<FeedEvents> {
     if (this.finished) return false;
     // A malformed answer is a failed refresh, retried with backoff, never trusted.
     const problem =
-      tokensProblem(tokens) ??
+      this.replyProblem(tokens) ??
       (this.opened &&
       this.transportName === "sdk" &&
       !tokens.transport &&

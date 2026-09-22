@@ -46,6 +46,12 @@ export function tokensProblem(body: unknown): string | undefined {
   return undefined;
 }
 
+function machineOk(machine: unknown): boolean {
+  if (!machine || typeof machine !== "object") return false;
+  const m = machine as Body;
+  return nonEmpty(m.uuid) && (m.game_name === undefined || typeof m.game_name === "string");
+}
+
 /** The first problem in a create response body, or undefined. */
 export function createdProblem(body: unknown): string | undefined {
   const problem = tokensProblem(body);
@@ -57,6 +63,6 @@ export function createdProblem(body: unknown): string | undefined {
   if (b.transport !== "sdk" && b.transport !== "sse") return "transport";
   if (b.transport === "sdk" && b.ws_endpoint === undefined) return "ws_endpoint";
   if (b.transport === "sse" && b.sse_endpoint === undefined) return "sse_endpoint";
-  if (!Array.isArray(b.machines)) return "machines";
+  if (!Array.isArray(b.machines) || !b.machines.every(machineOk)) return "machines";
   return undefined;
 }
