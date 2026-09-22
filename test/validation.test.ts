@@ -13,6 +13,7 @@ import {
   FEED_TOKEN,
   MACHINE_A,
   SSE_ENDPOINT,
+  WS_ENDPOINT,
   heartbeatSdk,
   heartbeatSse,
   jwt,
@@ -63,6 +64,27 @@ describe("tokensProblem (heartbeat bodies)", () => {
     ],
     ["a numeric sse_endpoint", { ...heartbeatSse(1), sse_endpoint: 5 }, "sse_endpoint"],
     ["a ws sse_endpoint", { ...heartbeatSse(1), sse_endpoint: "wss://c.test/sse" }, "sse_endpoint"],
+    // An endpoint for the other transport, explicit or inferred.
+    [
+      "sdk (explicit) with an sse_endpoint",
+      { ...heartbeatSdk(1), transport: "sdk", sse_endpoint: SSE_ENDPOINT },
+      "sse_endpoint",
+    ],
+    [
+      "sdk (inferred) with an sse_endpoint",
+      { ...heartbeatSdk(1), sse_endpoint: SSE_ENDPOINT },
+      "sse_endpoint",
+    ],
+    [
+      "sse (explicit) with a ws_endpoint",
+      { ...heartbeatSse(1), transport: "sse", ws_endpoint: WS_ENDPOINT },
+      "ws_endpoint",
+    ],
+    [
+      "sse (inferred) with a ws_endpoint",
+      { ...heartbeatSse(1), ws_endpoint: WS_ENDPOINT },
+      "ws_endpoint",
+    ],
   ])("rejects %s", (_label, body, field) => {
     expect(tokensProblem(body)).toBe(field);
   });
@@ -87,6 +109,17 @@ describe("createdProblem (create bodies)", () => {
     ["sdk without ws_endpoint", { ...CREATED_SDK, ws_endpoint: undefined }, "ws_endpoint"],
     ["sse without sse_endpoint", { ...CREATED_SSE, sse_endpoint: undefined }, "sse_endpoint"],
     ["no machines", { ...CREATED_SSE, machines: undefined }, "machines"],
+    [
+      "sdk with only an sse_endpoint",
+      { ...CREATED_SDK, ws_endpoint: undefined, sse_endpoint: SSE_ENDPOINT },
+      "sse_endpoint",
+    ],
+    ["sdk with both endpoints", { ...CREATED_SDK, sse_endpoint: SSE_ENDPOINT }, "sse_endpoint"],
+    [
+      "sse with only a ws_endpoint",
+      { ...CREATED_SSE, sse_endpoint: undefined, ws_endpoint: WS_ENDPOINT },
+      "ws_endpoint",
+    ],
   ])("rejects %s", (_label, body, field) => {
     expect(createdProblem(body)).toBe(field);
   });
@@ -178,6 +211,51 @@ describe("heartbeat validation in the feed", () => {
     expect(api.count("heartbeat")).toBe(2);
     expect(feed.status).not.toBe("ended");
     await feed.stop({ deleteFeed: false });
+  });
+
+  it("retries, without reconnecting, a heartbeat whose endpoint is for the other transport", async () => {
+    const api = fakeApi();
+    const stream = sseStream();
+    api.queue("sse", (init) => stream.respond(init));
+    api.queue("heartbeat", json(200, { ...heartbeatSse(2), ws_endpoint: WS_ENDPOINT }));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: CREATED_SSE,
+    });
+    const errors: string[] = [];
+    feed.on("error", (e) => errors.push(e.message));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(CREATED_SSE.heartbeat_interval * 1000);
+    expect(errors).toEqual(["malformed heartbeat response: bad ws_endpoint"]);
+    expect(api.count("sse")).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await feed.stop({ deleteFeed: false });
+  });
+
+  it("never reuses the last endpoint for a different transport", async () => {
+    const api = fakeApi();
+    api.queue("heartbeat", json(200, { ...heartbeatSse(2), transport: "sse" }));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      websocket: SilentSocket,
+      initialTokens: CREATED_SDK,
+    });
+    const errors: string[] = [];
+    const ended: string[] = [];
+    feed.on("error", (e) => errors.push(e.message));
+    feed.on("ended", ({ reason }) => ended.push(reason));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(CREATED_SDK.heartbeat_interval * 1000);
+    // The ws endpoint from create is never handed to fetch.
+    expect(api.count("sse")).toBe(0);
+    expect(errors[0]).toMatch(/No Centrifugo endpoint/);
+    expect(ended).toEqual(["stopped"]);
   });
 
   it("falls back to a heartbeat when the tokens in hand are malformed", async () => {

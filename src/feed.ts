@@ -328,9 +328,12 @@ export class Feed extends Emitter<FeedEvents> {
     const interval = tokens.heartbeat_interval;
     this.tokens = tokens;
     this.refreshAttempts = 0;
-    // The heartbeat response may not carry the endpoint yet: keep the last known one.
-    this.endpoint = tokens.ws_endpoint ?? tokens.sse_endpoint ?? this.endpoint;
     const name: Transport = tokens.transport ?? (tokens.subscription_token ? "sdk" : "sse");
+    // The heartbeat response may not carry the endpoint yet: keep the last known
+    // one, but never one for the other transport.
+    const known = this.endpoint && /^wss?:/i.test(this.endpoint) === (name === "sdk");
+    this.endpoint =
+      tokens.ws_endpoint ?? tokens.sse_endpoint ?? (known ? this.endpoint : undefined);
     try {
       if (!this.endpoint) {
         throw new FeedError(

@@ -38,6 +38,11 @@ export function tokensProblem(body: unknown): string | undefined {
   if (b.sse_endpoint !== undefined && !endpointOk(b.sse_endpoint, /^https?:/i)) {
     return "sse_endpoint";
   }
+  // An endpoint for the other transport would hand an https URL to the WebSocket
+  // SDK, or a ws URL to fetch. The transport is explicit, or inferred as the feed does.
+  const transport = b.transport ?? (b.subscription_token === undefined ? "sse" : "sdk");
+  if (transport === "sdk" && b.sse_endpoint !== undefined) return "sse_endpoint";
+  if (transport === "sse" && b.ws_endpoint !== undefined) return "ws_endpoint";
   return undefined;
 }
 
