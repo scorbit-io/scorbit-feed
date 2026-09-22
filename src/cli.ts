@@ -112,6 +112,16 @@ async function staticRoot(dir: string): Promise<string> {
   throw new UsageError(`--static ${dir} is not a directory`);
 }
 
+/** Server- or user-supplied text in a log line: control characters (newlines, ANSI escapes) become "?". */
+function clean(text: string): string {
+  return Array.from(text, (c) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? "?" : c;
+  }).join("");
+}
+
+const messageOf = (err: unknown) => clean((err as Error).message);
+
 /** Run the agent. Resolves once it is serving, or `undefined` if it exited early. */
 export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle | undefined> {
   const log = (line: string) => deps.log(redact(line));
@@ -127,10 +137,22 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     }
     if (options.static !== undefined) root = await staticRoot(options.static);
   } catch (err) {
-    log(`error: ${(err as Error).message}\n\n${USAGE}`);
+    log(`error: ${messageOf(err)}\n\n${USAGE}`);
     deps.exit(2);
     return undefined;
   }
+
+  // Registered before anything is created, so a signal during the create still
+  // leads to the feed being deleted: the handler only records it until the
+  // agent can act, and each step below checks.
+  let stopRequested = false;
+  const running: { shutdown?: () => Promise<void> } = {};
+  const onSignal = () => {
+    stopRequested = true;
+    if (running.shutdown) void running.shutdown();
+  };
+  deps.signals.once("SIGINT", onSignal);
+  deps.signals.once("SIGTERM", onSignal);
 
   const apiKey = deps.env.SCORBIT_API_KEY;
   const feedToken = deps.env.SCORBIT_FEED_TOKEN;
@@ -147,7 +169,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
         baseUrl: options["base-url"],
         fetch: deps.fetch,
       });
-      log(`attaching to feed ${options["feed-id"]}`);
+      log(`attaching to feed ${clean(options["feed-id"])}`);
     } else {
       if (!apiKey) {
         throw new UsageError(
@@ -165,13 +187,22 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
       // Set at once: anything that fails from here on must delete the feed.
       created = true;
       const names = opened.created.machines.map((m) => m.game_name).join(", ");
-      log(`created feed ${feed.feedId} (${opened.created.transport}) over ${names}`);
+      log(`created feed ${clean(feed.feedId)} (${opened.created.transport}) over ${clean(names)}`);
     }
   } catch (err) {
     // `created` is set only once `feed` exists.
     if (created) await feed.stop().catch(() => undefined);
-    log(`error: ${(err as Error).message}`);
+    log(`error: ${messageOf(err)}`);
     deps.exit(err instanceof UsageError ? 2 : 1);
+    return undefined;
+  }
+  if (stopRequested) {
+    // A signal arrived while the feed was being created.
+    log("stopping; deleting the feed this agent created");
+    await feed.stop({ deleteFeed: created }).catch((err: unknown) => {
+      log(`could not delete feed: ${messageOf(err)}`);
+    });
+    deps.exit(0);
     return undefined;
   }
 
@@ -188,13 +219,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   let cleaned: Promise<void> | undefined;
   const cleanup = (): Promise<void> =>
     (cleaned ??= feed.stop({ deleteFeed: created }).catch((err: unknown) => {
-      log(`could not delete feed: ${(err as Error).message}`);
+      log(`could not delete feed: ${messageOf(err)}`);
     }));
 
   // Set before feed.stop(), whose `ended` event fires synchronously.
   let stopping = false;
   let stopped: Promise<void> | undefined;
-  const shutdown = (): Promise<void> => {
+  const shutdownNow = (): Promise<void> => {
     stopping = true;
     stopped ??= (async () => {
       log(created ? "stopping; deleting the feed this agent created" : "stopping");
@@ -211,10 +242,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     log(`feed ${status}`);
   });
   feed.on("machines", ({ added, removed }) => {
-    if (added.length) log(`machines joined: ${added.join(", ")}`);
-    if (removed.length) log(`machines left: ${removed.join(", ")}`);
+    if (added.length) log(`machines joined: ${clean(added.join(", "))}`);
+    if (removed.length) log(`machines left: ${clean(removed.join(", "))}`);
   });
-  feed.on("error", (err) => log(`warning: ${err.message}`));
+  feed.on("error", (err) => log(`warning: ${messageOf(err)}`));
   feed.on("ended", ({ reason }) => {
     if (stopping) return;
     stopping = true;
@@ -228,7 +259,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   try {
     address = await server.listen();
   } catch (err) {
-    log(`error: cannot listen on ${options.host}:${options.port}: ${(err as Error).message}`);
+    log(`error: cannot listen on ${clean(options.host)}:${options.port}: ${messageOf(err)}`);
     stopping = true;
     await cleanup();
     deps.exit(1);
@@ -242,8 +273,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   }
   log(`serving on ${url} (GET /state, /events, /healthz${root ? ", and static files" : ""})`);
 
-  deps.signals.once("SIGINT", () => void shutdown());
-  deps.signals.once("SIGTERM", () => void shutdown());
+  running.shutdown = shutdownNow;
+  if (stopRequested) {
+    // A signal arrived while the server was starting.
+    await shutdownNow();
+    return undefined;
+  }
   feed.start();
-  return { feed, server, url, shutdown };
+  return { feed, server, url, shutdown: shutdownNow };
 }

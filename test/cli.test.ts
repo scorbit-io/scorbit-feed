@@ -400,3 +400,72 @@ describe("scorbit-feed agent (attach mode)", () => {
     expect([...a.api.calls, ...b.api.calls]).toHaveLength(0);
   });
 });
+
+describe("scorbit-feed signals and log hygiene", () => {
+  it("deletes the feed when a signal arrives while it is being created", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    let answer!: (response: Response) => void;
+    h.api.queue("create", () => new Promise<Response>((resolve) => (answer = resolve)));
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    const running = h.run([...base, "--transport", "sse"]);
+    await flush();
+    h.signals.emit("SIGINT");
+    answer(json(201, CREATED_SSE));
+    expect(await running).toBeUndefined();
+    expect(h.exits).toEqual([0]);
+    const del = h.api.calls.find((c) => c.key === "delete")!;
+    expect(del.headers.Authorization).toBe(`Bearer ${FEED_TOKEN}`);
+    // It never started serving or connecting.
+    expect(h.api.count("sse")).toBe(0);
+    expect(h.lines.some((l) => l.startsWith("serving on"))).toBe(false);
+    h.noSecrets();
+  });
+
+  it("logs, and still exits, when that delete fails", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    let answer!: (response: Response) => void;
+    h.api.queue("create", () => new Promise<Response>((resolve) => (answer = resolve)));
+    h.api.queue("delete", json(500));
+    const running = h.run([...base, "--transport", "sse"]);
+    await flush();
+    h.signals.emit("SIGTERM");
+    answer(json(201, CREATED_SSE));
+    await running;
+    expect(h.exits).toEqual([0]);
+    expect(h.lines).toContain("could not delete feed: Scorbit API answered 500");
+  });
+
+  it("shuts down, without deleting an attached feed, on a signal while the server starts", async () => {
+    const h = harness({ SCORBIT_FEED_TOKEN: FEED_TOKEN });
+    const running = h.run([...base, "--feed-id", FEED_ID, "--endpoint", SSE_ENDPOINT]);
+    h.signals.emit("SIGINT");
+    expect(await running).toBeUndefined();
+    expect(h.exits).toEqual([0]);
+    expect(h.api.calls).toHaveLength(0);
+  });
+
+  it("strips control characters from server-supplied text in log lines", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue(
+      "create",
+      json(201, {
+        ...CREATED_SSE,
+        machines: [{ uuid: MACHINE_A, game_name: "Evil\u001b[2J\nFAKE: all clear\u0007\u007f" }],
+      }),
+    );
+    h.api.queue("sse", (init) => sseStream().respond(init));
+    await h.run([...base, "--transport", "sse"]);
+    const line = h.lines.find((l) => l.startsWith("created feed"))!;
+    expect(line).toBe(`created feed ${FEED_ID} (sse) over Evil?[2J?FAKE: all clear??`);
+    const controls = (l: string) =>
+      [...l].some((c) => c.charCodeAt(0) === 0x7f || (c.charCodeAt(0) < 0x20 && c !== "\n"));
+    expect(h.lines.some(controls)).toBe(false);
+  });
+
+  it("strips control characters from server error details", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(403, { detail: "no\r\n\u001b[31mred" }));
+    await h.run([...base]);
+    expect(h.lines[0]).toBe("error: Scorbit API answered 403: no???[31mred");
+  });
+});
