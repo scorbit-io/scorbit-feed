@@ -542,3 +542,16 @@ describe("stale SSE frames", () => {
     await feed.stop({ deleteFeed: false });
   });
 });
+
+describe("create and heartbeat replies carrying only what the API guarantees", () => {
+  it("accepts a heartbeat with only the guaranteed fields", () => {
+    expect(tokensProblem(heartbeatSse(1))).toBeUndefined();
+    expect(tokensProblem(heartbeatSdk(1))).toBeUndefined();
+  });
+
+  it("accepts a create reply whose machine game_name is blank", () => {
+    expect(
+      createdProblem({ ...CREATED_SSE, machines: [{ uuid: MACHINE_A, game_name: "" }] }),
+    ).toBeUndefined();
+  });
+});

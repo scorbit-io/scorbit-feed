@@ -2,6 +2,14 @@
  * Response fixtures for the Data Feed REST API: shapes from the Scorbit API's
  * data-feed serializers, including which keys each transport receives.
  *
+ * The response serializers' fields are all read-only, which in DRF means
+ * required=False: a key is present only if the view puts it in the payload.
+ * The view always sets feed_id, connection_token, ttl, token_ttl and
+ * heartbeat_interval (plus subscription_token for sdk); on create also
+ * feed_token, channel, transport, machines (uuid and game_name, which may be
+ * "") and the transport's endpoint. The heartbeat serializer declares no
+ * channel, transport or endpoint, so those are absent from heartbeats.
+ *
  * Every credential here is an obviously fake placeholder. The heartbeat
  * fixtures have no endpoint fields because the heartbeat response does not
  * include them yet; `withEndpoint` builds the shape once it does.

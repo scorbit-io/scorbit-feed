@@ -1,6 +1,8 @@
 import { FEED_TOKEN_PREFIX, TIMER_MAX_SECONDS, checkEndpoint } from "./http.js";
 
 // Response bodies are checked at the boundary, before anything trusts them.
+// Required here means the API always sends it: the response fields are
+// read-only, and the view fills every one listed as required on every reply.
 // Each check names the field that failed, never its value (it may be a token).
 
 type Body = Record<string, unknown>;

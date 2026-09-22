@@ -6,7 +6,7 @@ import { asFeedUpdate, parsePublication } from "../src/message.js";
 import { SseParser } from "../src/sse-parser.js";
 import type { FeedUpdate } from "../src/types.js";
 import { BASE_URL, CREATED_SSE, FEED_ID, FEED_TOKEN } from "./fixtures/api.js";
-import { CONNECT_FRAME, UPDATE, pubFrame } from "./fixtures/messages.js";
+import { CONNECT_FRAME, MINIMAL_UPDATE, UPDATE, pubFrame } from "./fixtures/messages.js";
 import { fakeApi, flush, sseStream } from "./helpers.js";
 
 const machine = UPDATE.payload.machines[0]!;
@@ -127,6 +127,10 @@ describe("parsePublication", () => {
     expect(parsePublication(data)).toEqual({ update: data as FeedUpdate });
   });
 
+  it("accepts a publication carrying only the fields the serializers guarantee", () => {
+    expect(parsePublication(MINIMAL_UPDATE)).toEqual({ update: MINIMAL_UPDATE });
+  });
+
   it.each([null, "x", { type: "other" }, [UPDATE]])(
     "ignores %j, which is not a feed update",
     (data) => {
@@ -163,11 +167,14 @@ describe("a malformed publication on a live feed", () => {
     feed.start();
     await flush();
     stream.push(
-      CONNECT_FRAME + pubFrame({ ...UPDATE, payload: { machines: [null] } }) + pubFrame(UPDATE),
+      CONNECT_FRAME +
+        pubFrame({ ...UPDATE, payload: { machines: [null] } }) +
+        pubFrame(UPDATE) +
+        pubFrame(MINIMAL_UPDATE),
     );
     await flush();
     expect(errors).toEqual(["malformed publication dropped: bad machines[0]"]);
-    expect(updates).toEqual([UPDATE]);
+    expect(updates).toEqual([UPDATE, MINIMAL_UPDATE]);
     expect(machines).toHaveLength(1);
     expect(feed.status).toBe("live");
     await feed.stop({ deleteFeed: false });

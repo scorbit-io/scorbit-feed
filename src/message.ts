@@ -1,7 +1,9 @@
 import type { FeedUpdate } from "./types.js";
 
-// Publications are checked at the boundary, for every field the feed, the
-// agent's /state and the starter overlay read. A problem names the field only.
+// Publications are checked at the boundary. Required here means the server's
+// serializer guarantees it (required, or has a default); a field it may omit
+// is optional, and null or "" is accepted where the serializer allows them.
+// A problem names the field only.
 
 type Body = Record<string, unknown>;
 
