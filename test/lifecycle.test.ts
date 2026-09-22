@@ -15,6 +15,7 @@ import {
   MACHINE_A,
   SSE_ENDPOINT,
   heartbeatSse,
+  jwt,
   withEndpoint,
 } from "./fixtures/api.js";
 import { CONNECT_FRAME, UPDATE, pubFrame } from "./fixtures/messages.js";
@@ -180,6 +181,72 @@ describe("feed error listeners and stability", () => {
     await flush();
     // Thirty seconds live in total: refreshed at once, no backoff.
     expect(api.count("heartbeat")).toBe(1);
+  });
+});
+
+describe("review fixes", () => {
+  it("runs attachFeed's checks in the Feed constructor too", () => {
+    expect(() => new Feed({ feedId: FEED_ID, feedToken: API_KEY })).toThrow(/sb_live_ API key/);
+    expect(() => new Feed({ feedId: FEED_ID, feedToken: "nope" })).toThrow(/sbf_ feed token/);
+    expect(
+      () => new Feed({ feedId: FEED_ID, feedToken: FEED_TOKEN, baseUrl: "http://evil.example" }),
+    ).toThrow(/baseUrl/);
+    expect(new Feed({ feedId: FEED_ID, feedToken: FEED_TOKEN })).toBeInstanceOf(Feed);
+  });
+
+  it("redacts credentials in a server error's message and detail", async () => {
+    const api = fakeApi();
+    api.queue(
+      "create",
+      json(400, { detail: `bad key ${API_KEY} token ${FEED_TOKEN} jwt ${jwt("x")}` }),
+    );
+    const error = await request<never>(api.fetch, "https://x.test/", "POST", API_KEY, {}).catch(
+      (e: FeedHttpError) => e,
+    );
+    expect(error.detail).toBe("bad key [redacted] token [redacted] jwt [redacted]");
+    expect(error.message).toBe(
+      "Scorbit API answered 400: bad key [redacted] token [redacted] jwt [redacted]",
+    );
+  });
+
+  it("ends once when an error listener calls stop() while the feed is ending itself", async () => {
+    const { api, feed, ended, statuses } = setup();
+    queueStream(api);
+    api.queue(
+      "heartbeat",
+      json(200, withEndpoint(heartbeatSse(2), "http://centrifugo.example/uni_sse")),
+    );
+    api.queue("delete", new Response(null, { status: 204 }));
+    feed.on("error", () => void feed.stop());
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(ended).toEqual(["stopped"]);
+    expect(statuses.filter((s) => s === "ended")).toHaveLength(1);
+    expect(api.count("delete")).toBe(1);
+  });
+
+  it("still deletes on stop() after the feed ended locally, and retries a failed delete", async () => {
+    const { api, feed, ended } = setup({
+      initialTokens: { ...CREATED_SSE, sse_endpoint: "http://centrifugo.example/uni_sse" },
+    });
+    feed.start();
+    expect(ended).toEqual(["stopped"]);
+    api.queue("delete", json(500), new Response(null, { status: 204 }));
+    await expect(feed.stop()).rejects.toMatchObject({ status: 500 });
+    await expect(feed.stop()).resolves.toBeUndefined();
+    await feed.stop();
+    expect(api.count("delete")).toBe(2);
+  });
+
+  it("does not try to delete a feed the server already ended", async () => {
+    const { api, feed, ended } = setup();
+    queueStream(api);
+    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(ended).toEqual(["ended"]);
+    await feed.stop();
+    expect(api.count("delete")).toBe(0);
   });
 });
 

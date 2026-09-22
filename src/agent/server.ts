@@ -7,7 +7,6 @@ import { pipeline } from "node:stream/promises";
 import type { FeedMachineState, FeedStatus, FeedUpdate } from "../types.js";
 
 const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/;
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 // Routes a page opened from file:// may read when --allow-file-origin is set.
 const FILE_ORIGIN_ROUTES = new Set(["/state", "/events"]);
 
@@ -48,8 +47,19 @@ export function isAllowedOrigin(origin: string, configured: readonly string[] = 
   return LOCAL_ORIGIN.test(origin) || configured.includes(origin);
 }
 
-function isLoopbackHost(host: string): boolean {
-  return LOOPBACK_HOSTS.has(host);
+/** localhost, any 127.0.0.0/8 address, or ::1 (also IPv4-mapped); any case, brackets optional. */
+export function isLoopbackHost(host: string): boolean {
+  const name = host
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, "$1")
+    .replace(/\.$/, "");
+  const v4 = name.replace(/^::ffff:/, "");
+  return (
+    name === "localhost" ||
+    name === "::1" ||
+    name === "0:0:0:0:0:0:0:1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4)
+  );
 }
 
 /** The hostname part of a Host header, brackets kept for IPv6. */

@@ -113,12 +113,18 @@ export class Feed extends Emitter<FeedEvents> {
   private liveSince: number | undefined;
   private started = false;
   private finished = false;
+  private endReason: EndReason | undefined;
+  private deletion: Promise<void> | undefined;
   // Never assumed fixed: every update is compared against the last set seen.
   private machineSet: string[];
 
-  /** @internal Use {@link attachFeed}. */
+  /**
+   * Same as {@link attachFeed}. The checks run here, so no way of constructing
+   * a Feed can skip them: an `sbf_` token only, and https URLs.
+   */
   constructor(options: AttachOptions) {
     super();
+    checkAttachOptions(options);
     this.feedId = options.feedId;
     this.feedToken = options.feedToken;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
@@ -153,10 +159,22 @@ export class Feed extends Emitter<FeedEvents> {
   }
 
   /** Disconnect, stop refreshing, and (by default) delete the feed on the server. */
+  /**
+   * Idempotent: safe to call again after the feed ended locally (for example
+   * on a bad endpoint), and it still deletes the feed then. After the server
+   * ended it (`withdrawn`, `ended`, `unauthorized`) there is nothing to delete.
+   */
   async stop({ deleteFeed = true }: StopOptions = {}): Promise<void> {
-    if (this.finished) return;
     this.end("stopped");
-    if (!deleteFeed) return;
+    if (!deleteFeed || this.endReason !== "stopped") return;
+    this.deletion ??= this.deleteOnServer().catch((err: unknown) => {
+      this.deletion = undefined; // a failed delete may be retried
+      throw err;
+    });
+    return this.deletion;
+  }
+
+  private async deleteOnServer(): Promise<void> {
     try {
       await request(this.fetchImpl, feedUrl(this.baseUrl, this.feedId), "DELETE", this.feedToken);
     } catch (err) {
@@ -180,8 +198,10 @@ export class Feed extends Emitter<FeedEvents> {
   }
 
   private end(reason: EndReason): void {
-    // Finished first, so nothing a listener does below can restart any work.
+    // Once only; and finished first, so nothing a listener does below can restart any work.
+    if (this.finished) return;
     this.finished = true;
+    this.endReason = reason;
     this.clearTimer();
     this.transport?.close();
     this.currentStatus = "ended";
@@ -368,6 +388,10 @@ export class Feed extends Emitter<FeedEvents> {
  * connects until `start()`.
  */
 export function attachFeed(options: AttachOptions): Feed {
+  return new Feed(options);
+}
+
+function checkAttachOptions(options: AttachOptions): void {
   const token = String(options.feedToken ?? "");
   if (token.startsWith(API_KEY_PREFIX)) {
     throw new FeedError(
@@ -380,5 +404,4 @@ export function attachFeed(options: AttachOptions): Feed {
   if (!options.feedId) throw new FeedError("attachFeed needs a feedId.");
   checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL);
   if (options.endpoint !== undefined) checkEndpoint(options.endpoint);
-  return new Feed(options);
 }

@@ -8,7 +8,7 @@ import type { ServerResponse } from "node:http";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { AgentServer, isAllowedOrigin } from "../src/agent/server.js";
+import { AgentServer, isAllowedOrigin, isLoopbackHost } from "../src/agent/server.js";
 import { UPDATE } from "./fixtures/messages.js";
 
 let tmp: string;
@@ -446,5 +446,51 @@ describe("AgentServer static hardening", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect((await raw(port, "/index.html")).status).toBe(200);
+  });
+});
+
+describe("isLoopbackHost", () => {
+  it.each([
+    "localhost",
+    "LOCALHOST",
+    "LocalHost.",
+    "127.0.0.1",
+    "127.1.2.3",
+    "::1",
+    "[::1]",
+    "0:0:0:0:0:0:0:1",
+    "::ffff:127.0.0.1",
+    "[::FFFF:127.0.0.9]",
+  ])("%s is loopback", (host) => {
+    expect(isLoopbackHost(host)).toBe(true);
+  });
+
+  it.each([
+    "0.0.0.0",
+    "::",
+    "192.168.1.10",
+    "127.0.0.1.evil.example",
+    "localhost.evil",
+    "128.0.0.1",
+  ])("%s is not loopback", (host) => {
+    expect(isLoopbackHost(host)).toBe(false);
+  });
+
+  it("keeps the rebinding check when bound with an upper-case host name", async () => {
+    const server = new AgentServer({ host: "LOCALHOST", port: 0 });
+    servers.push(server);
+    const { port, address } = await server.listen();
+    const res = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        { host: address, port, path: "/state", headers: { Host: "evil.example" } },
+        (r) => {
+          resolve(r.statusCode ?? 0);
+          r.resume();
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(res).toBe(403);
   });
 });

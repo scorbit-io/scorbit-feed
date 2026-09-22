@@ -280,6 +280,33 @@ describe("scorbit-feed agent (create mode)", () => {
   });
 });
 
+describe("scorbit-feed agent cleanup", () => {
+  it("deletes a feed it created that ended locally, once, and exits 1", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue(
+      "create",
+      json(201, { ...CREATED_SSE, sse_endpoint: "http://centrifugo.example/uni_sse" }),
+    );
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    await h.run([...base, "--transport", "sse"]);
+    expect(await h.exited).toBe(1);
+    expect(h.lines).toContain("feed ended: stopped");
+    expect(h.api.count("delete")).toBe(1);
+    h.signals.emit("SIGINT");
+    await flush();
+    expect(h.api.count("delete")).toBe(1);
+    h.noSecrets();
+  });
+
+  it("does not warn about the network for an upper-case loopback host", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, CREATED_SSE));
+    h.api.queue("sse", (init) => sseStream().respond(init));
+    await h.run([...base, "--host", "LOCALHOST", "--transport", "sse"]);
+    expect(h.lines.some((l) => l.includes("other machines on the network"))).toBe(false);
+  });
+});
+
 describe("scorbit-feed agent (attach mode)", () => {
   it("attaches with the env feed token, and on SIGTERM never deletes the feed", async () => {
     const h = harness({ SCORBIT_FEED_TOKEN: FEED_TOKEN });

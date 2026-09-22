@@ -33,10 +33,12 @@ export class FeedHttpError extends FeedError {
   readonly retryAfter: number | undefined;
 
   constructor(status: number, detail: string | undefined, retryAfter?: number) {
-    super(`Scorbit API answered ${status}${detail ? `: ${detail}` : ""}`);
+    // The server's text is untrusted: never let it carry a credential into a log.
+    const safe = detail === undefined ? undefined : redact(detail);
+    super(`Scorbit API answered ${status}${safe ? `: ${safe}` : ""}`);
     this.name = "FeedHttpError";
     this.status = status;
-    this.detail = detail;
+    this.detail = safe;
     this.retryAfter = retryAfter;
   }
 }

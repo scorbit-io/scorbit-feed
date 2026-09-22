@@ -1,7 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
-import { AgentServer } from "./agent/server.js";
+import { AgentServer, isLoopbackHost } from "./agent/server.js";
 import { openFeed } from "./create.js";
 import { type Feed, attachFeed } from "./feed.js";
 import { type FetchLike, redact } from "./http.js";
@@ -63,8 +63,6 @@ export interface AgentHandle {
 }
 
 class UsageError extends Error {}
-
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function parse(argv: string[]) {
   const { values } = parseArgs({
@@ -182,6 +180,14 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     allowFileOrigin: options["allow-file-origin"],
   });
 
+  // Every exit route runs this: it deletes a feed this agent created, once,
+  // even when the feed already ended locally (feed.stop() is idempotent).
+  let cleaned: Promise<void> | undefined;
+  const cleanup = (): Promise<void> =>
+    (cleaned ??= feed.stop({ deleteFeed: created }).catch((err: unknown) => {
+      log(`could not delete feed: ${(err as Error).message}`);
+    }));
+
   // Set before feed.stop(), whose `ended` event fires synchronously.
   let stopping = false;
   let stopped: Promise<void> | undefined;
@@ -189,11 +195,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     stopping = true;
     stopped ??= (async () => {
       log(created ? "stopping; deleting the feed this agent created" : "stopping");
-      try {
-        await feed.stop({ deleteFeed: created });
-      } catch (err) {
-        log(`could not delete feed: ${(err as Error).message}`);
-      }
+      await cleanup();
       await server.close();
       deps.exit(0);
     })();
@@ -212,8 +214,11 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   feed.on("error", (err) => log(`warning: ${err.message}`));
   feed.on("ended", ({ reason }) => {
     if (stopping) return;
+    stopping = true;
     log(`feed ended: ${reason}`);
-    void server.close().then(() => deps.exit(1));
+    void cleanup()
+      .then(() => server.close())
+      .then(() => deps.exit(1));
   });
 
   let address;
@@ -222,12 +227,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   } catch (err) {
     log(`error: cannot listen on ${options.host}:${options.port}: ${(err as Error).message}`);
     stopping = true;
-    await feed.stop({ deleteFeed: created }).catch(() => undefined);
+    await cleanup();
     deps.exit(1);
     return undefined;
   }
   const url = `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
-  if (!LOOPBACK.has(options.host)) {
+  if (!isLoopbackHost(options.host)) {
     log(
       `warning: listening on ${options.host}, so other machines on the network can read this feed`,
     );
