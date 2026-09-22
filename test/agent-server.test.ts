@@ -136,7 +136,7 @@ describe("AgentServer routes", () => {
 
     const health = await fetch(`${base}/healthz`);
     expect(health.status).toBe(200);
-    expect(await health.json()).toEqual({ ok: true, status: "live" });
+    expect(await health.json()).toEqual({ ok: true, status: "live", agent: "scorbit-feed" });
     server.publishStatus("ended");
     expect((await fetch(`${base}/healthz`)).status).toBe(503);
 

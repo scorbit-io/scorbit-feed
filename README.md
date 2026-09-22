@@ -231,7 +231,8 @@ Routes:
   Machines that leave a live feed drop out; the agent logs joins and leaves.
 - `GET /events`: Server-Sent Events. `status` events carry `{ status }`; `state`
   events carry the same body as `/state`. The current values are sent on connect.
-- `GET /healthz`: `200` while the feed is running, `503` once it has ended.
+- `GET /healthz`: `200` while the feed is running, `503` once it has ended. The
+  body is `{ ok, status, agent: "scorbit-feed" }`.
 
 Browsers are allowed from `http://localhost` and `http://127.0.0.1` on any port,
 and from each `--cors-origin`. Any other `Origin` is refused with `403`.
@@ -259,10 +260,17 @@ SCORBIT_API_KEY=sb_live_... npx scorbit-feed --machines <uuid> \
   --static node_modules/@scorbit/feed/templates/overlay
 ```
 
-Then add `http://127.0.0.1:8787/` as an OBS browser source. To open it from disk
-instead, start the agent with `--allow-file-origin`; it then reads the agent at
-`http://127.0.0.1:8787` (override with `?agent=<url>`). Copy the folder and
-restyle it freely.
+Then add `http://127.0.0.1:8787/` as an OBS browser source. The overlay uses its
+own origin only when that origin is the agent (it checks the agent's `/healthz`);
+opened any other way it reads the agent at `http://127.0.0.1:8787`, or at
+`?agent=<http(s) url>`:
+
+- **From disk (`file://`):** start the agent with `--allow-file-origin`. A page
+  opened from disk sends `Origin: null`, which the agent refuses by default.
+- **From your own web server:** allow that server's origin with
+  `--cors-origin <origin>`.
+
+Copy the folder and restyle it freely.
 
 ## Branding and attribution
 

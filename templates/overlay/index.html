@@ -3,9 +3,14 @@
   Scorbit feed overlay: a starter for an OBS browser source.
 
   Run the agent (`scorbit-feed --machines ... --static templates/overlay`) and
-  point OBS at http://127.0.0.1:8787/ -- or open this file directly, with the
-  agent started with --allow-file-origin, and it reads the agent at
-  http://127.0.0.1:8787 (override with ?agent=<url>).
+  point OBS at http://127.0.0.1:8787/.
+
+  Opened any other way, the page reads the agent at http://127.0.0.1:8787, or
+  wherever ?agent=<http(s) url> says:
+  - from disk (file://): the agent must be started with --allow-file-origin,
+    because a file:// page sends `Origin: null`, which it refuses by default;
+  - from your own web server: add that server's origin to the agent with
+    --cors-origin <origin>.
 
   Everything here is yours to restyle except the attribution slot below.
 -->

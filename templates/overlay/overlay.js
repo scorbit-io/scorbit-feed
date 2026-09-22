@@ -3,9 +3,51 @@
 (function () {
   "use strict";
 
-  var params = new URLSearchParams(window.location.search);
-  var sameOrigin = window.location.protocol === "http:" || window.location.protocol === "https:";
-  var agent = params.get("agent") || (sameOrigin ? "" : "http://127.0.0.1:8787");
+  var DEFAULT_AGENT = "http://127.0.0.1:8787";
+
+  // An http(s) URL without its trailing slashes, or null.
+  function normaliseAgent(value) {
+    var url;
+    try {
+      url = new URL(value);
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return (url.origin + url.pathname).replace(/\/+$/, "");
+  }
+
+  // ?agent= wins. Otherwise use this page's own origin only if it IS the agent
+  // (its /healthz says so); a page on any other web server, or opened from
+  // disk, reads the agent at its default address.
+  function resolveAgent() {
+    var param = new URLSearchParams(window.location.search).get("agent");
+    if (param !== null) {
+      var chosen = normaliseAgent(param);
+      if (chosen !== null) return Promise.resolve(chosen);
+      console.warn("Scorbit overlay: ignoring ?agent=, which must be an http(s) URL");
+    }
+    var protocol = window.location.protocol;
+    if (protocol !== "http:" && protocol !== "https:") return Promise.resolve(DEFAULT_AGENT);
+    var controller = new AbortController();
+    var timer = setTimeout(function () {
+      controller.abort();
+    }, 2000);
+    return fetch("/healthz", { signal: controller.signal })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (body) {
+        return body && body.agent === "scorbit-feed" ? "" : DEFAULT_AGENT;
+      })
+      .catch(function () {
+        return DEFAULT_AGENT;
+      })
+      .then(function (agent) {
+        clearTimeout(timer);
+        return agent;
+      });
+  }
 
   var statusEl = document.getElementById("status");
   var machinesEl = document.getElementById("machines");
@@ -64,14 +106,16 @@
   }
 
   // EventSource reconnects by itself if the agent restarts.
-  var source = new EventSource(agent + "/events");
-  source.addEventListener("status", function (event) {
-    setStatus(JSON.parse(event.data).status);
+  resolveAgent().then(function (agent) {
+    var source = new EventSource(agent + "/events");
+    source.addEventListener("status", function (event) {
+      setStatus(JSON.parse(event.data).status);
+    });
+    source.addEventListener("state", function (event) {
+      render(JSON.parse(event.data).machines || []);
+    });
+    source.onerror = function () {
+      setStatus("reconnecting");
+    };
   });
-  source.addEventListener("state", function (event) {
-    render(JSON.parse(event.data).machines || []);
-  });
-  source.onerror = function () {
-    setStatus("reconnecting");
-  };
 })();

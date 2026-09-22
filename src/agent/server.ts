@@ -9,6 +9,7 @@ import type { FeedMachineState, FeedStatus, FeedUpdate } from "../types.js";
 const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/;
 // Routes a page opened from file:// may read when --allow-file-origin is set.
 const FILE_ORIGIN_ROUTES = new Set(["/state", "/events"]);
+export const AGENT_MARKER = "scorbit-feed";
 
 // Only these are served; anything else under --static is a 404.
 const CONTENT_TYPES: Record<string, string> = {
@@ -173,7 +174,8 @@ export class AgentServer {
     if (pathname === "/state") return sendJson(res, 200, this.snapshot());
     if (pathname === "/healthz") {
       const ok = this.status !== "ended";
-      return sendJson(res, ok ? 200 : 503, { ok, status: this.status });
+      // `agent` lets the starter overlay tell that the page it came from is this agent.
+      return sendJson(res, ok ? 200 : 503, { ok, status: this.status, agent: AGENT_MARKER });
     }
     if (pathname === "/events") return this.openEvents(req, res);
     if (this.options.staticDir) return this.serveStatic(this.options.staticDir, pathname, res);
