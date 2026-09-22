@@ -494,3 +494,55 @@ describe("isLoopbackHost", () => {
     expect(res).toBe(403);
   });
 });
+
+describe("AgentServer /events backpressure", () => {
+  const clientsOf = (server: AgentServer) =>
+    (server as unknown as { clients: Set<ServerResponse> }).clients;
+  const big = {
+    ...UPDATE,
+    payload: { machines: [{ ...UPDATE.payload.machines[0]!, game_name: "x".repeat(256 * 1024) }] },
+  };
+
+  it("disconnects a client that stops reading once its queue passes the bound, and keeps the rest", async () => {
+    const bound = 256 * 1024;
+    const { server, port, base } = await start({ maxClientBuffer: bound });
+    // A stalled reader: it sends the request and never reads the response.
+    const stalled = connect(port, "127.0.0.1");
+    const closed = new Promise<void>((resolve) => stalled.on("close", () => resolve()));
+    stalled.on("error", () => undefined);
+    stalled.write("GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    stalled.pause();
+    // A healthy reader alongside it.
+    const healthy = await fetch(`${base}/events`);
+    const reader = healthy.body!.getReader();
+    const drain = (async () => {
+      for (;;) if ((await reader.read()).done) break;
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(clientsOf(server).size).toBe(2);
+
+    let peak = 0;
+    for (let i = 0; i < 2000 && clientsOf(server).size === 2; i++) {
+      server.publishUpdate(big);
+      for (const client of clientsOf(server)) peak = Math.max(peak, client.writableLength);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(clientsOf(server).size).toBe(1);
+    // The server dropped the connection: once the reader looks, it finds it closed.
+    stalled.resume();
+    await closed;
+    // Never more than the bound plus the one frame written while under it.
+    expect(peak).toBeLessThanOrEqual(bound + JSON.stringify(big).length + 1024);
+    await reader.cancel();
+    await drain.catch(() => undefined);
+  });
+
+  it("refuses /events clients beyond the cap with 503", async () => {
+    const { port, base } = await start({ maxClients: 1 });
+    const first = await fetch(`${base}/events`);
+    const second = await raw(port, "/events");
+    expect(second.status).toBe(503);
+    expect(second.body).toContain("too many event clients");
+    await first.body!.cancel();
+  });
+});

@@ -41,7 +41,14 @@ export interface AgentServerOptions {
    * Off by default: sandboxed iframes on any website also send `Origin: null`.
    */
   allowFileOrigin?: boolean;
+  /** Bytes an /events client may have queued before it is disconnected. Default 1 MiB. */
+  maxClientBuffer?: number;
+  /** Concurrent /events clients; more are refused with 503. Default 64. */
+  maxClients?: number;
 }
+
+const MAX_CLIENT_BUFFER = 1024 * 1024;
+const MAX_CLIENTS = 64;
 
 /** Loopback http origins on any port, and the configured list. `null` is handled per route. */
 export function isAllowedOrigin(origin: string, configured: readonly string[] = []): boolean {
@@ -138,8 +145,22 @@ export class AgentServer {
     this.broadcast(sseFrame("status", { status }));
   }
 
+  /**
+   * Backpressure: a client that is not reading has its frames queue up in
+   * memory. Past the bound it is disconnected instead. Nothing is lost: every
+   * `state` frame is a full snapshot, and on reconnect (EventSource does so by
+   * itself) the client is sent the current status and state at once.
+   */
   private broadcast(frame: string): void {
-    for (const client of this.clients) client.write(frame);
+    const bound = this.options.maxClientBuffer ?? MAX_CLIENT_BUFFER;
+    for (const client of this.clients) {
+      if (client.writableLength > bound) {
+        this.clients.delete(client);
+        client.destroy();
+        continue;
+      }
+      client.write(frame);
+    }
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -183,6 +204,9 @@ export class AgentServer {
   }
 
   private openEvents(req: IncomingMessage, res: ServerResponse): void {
+    if (this.clients.size >= (this.options.maxClients ?? MAX_CLIENTS)) {
+      return sendJson(res, 503, { error: "too many event clients" });
+    }
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
