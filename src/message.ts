@@ -16,7 +16,10 @@ const isBoolean = (value: unknown) => typeof value === "boolean";
 function playerProblem(player: unknown): string | undefined {
   if (player === null) return undefined;
   if (!isObject(player) || !isString(player.username)) return "player";
-  if (!optional(player.display_name, isString)) return "player.display_name";
+  for (const field of ["id", "display_name", "initials"] as const) {
+    if (!optional(player[field], isString)) return `player.${field}`;
+  }
+  if (!optional(player.avatar, (v) => v === null || isString(v))) return "player.avatar";
   return undefined;
 }
 
@@ -25,7 +28,12 @@ function scoreProblem(score: unknown): string | undefined {
   if (!isNumber(score.position)) return "position";
   if (!isNumber(score.score)) return "score";
   if (!optional(score.ball, (v) => v === null || isNumber(v))) return "ball";
-  if (!optional(score.modes, Array.isArray)) return "modes";
+  if (!optional(score.ball_in_progress, (v) => v === null || isBoolean(v))) {
+    return "ball_in_progress";
+  }
+  if (!Array.isArray(score.modes) || !score.modes.every(isString)) return "modes";
+  if (!isBoolean(score.is_nfc_verified)) return "is_nfc_verified";
+  if (!optional(score.tournament_id, (v) => v === null || isString(v))) return "tournament_id";
   return playerProblem(score.player);
 }
 
@@ -34,7 +42,7 @@ function machineProblem(machine: unknown): string | undefined {
   if (!isString(machine.machine_uuid) || machine.machine_uuid === "") return "machine_uuid";
   if (!optional(machine.game_name, isString)) return "game_name";
   if (!isBoolean(machine.game_in_progress)) return "game_in_progress";
-  if (!optional(machine.game_ended, isBoolean)) return "game_ended";
+  if (!isBoolean(machine.game_ended)) return "game_ended";
   if (!optional(machine.updated_at, (v) => v === null || isString(v))) return "updated_at";
   if (!Array.isArray(machine.scores)) return "scores";
   for (const [i, score] of machine.scores.entries()) {
@@ -52,9 +60,10 @@ export function parsePublication(
   data: unknown,
 ): { update: FeedUpdate } | { problem: string } | undefined {
   if (!isObject(data) || data.type !== "data_feed_update") return undefined;
-  if (!optional(data.metadata, isObject)) return { problem: "metadata" };
-  const metadata = (data.metadata ?? {}) as Body;
-  if (!optional(metadata.updated_at, isString)) return { problem: "metadata.updated_at" };
+  if (!isObject(data.metadata)) return { problem: "metadata" };
+  for (const field of ["created_at", "updated_at"] as const) {
+    if (!isString(data.metadata[field])) return { problem: `metadata.${field}` };
+  }
   const payload = data.payload;
   if (!isObject(payload) || !Array.isArray(payload.machines)) return { problem: "machines" };
   for (const [i, machine] of payload.machines.entries()) {

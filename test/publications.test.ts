@@ -23,10 +23,45 @@ describe("parsePublication", () => {
     ["metadata not an object", { ...UPDATE, metadata: "x" }, "metadata"],
     [
       "a numeric metadata.updated_at",
-      { ...UPDATE, metadata: { updated_at: 5 } },
+      { ...UPDATE, metadata: { ...UPDATE.metadata, updated_at: 5 } },
       "metadata.updated_at",
     ],
-    ["no payload", { type: "data_feed_update" }, "machines"],
+    ["no metadata", { ...UPDATE, metadata: undefined }, "metadata"],
+    ["no metadata.created_at", { ...UPDATE, metadata: { updated_at: "x" } }, "metadata.created_at"],
+    ["no payload", { type: "data_feed_update", metadata: UPDATE.metadata }, "machines"],
+    ["no game_ended", withMachine({ game_ended: undefined }), "machines[0].game_ended"],
+    ["no modes", withScore({ modes: undefined }), "machines[0].scores[0].modes"],
+    ["a numeric mode", withScore({ modes: [1] }), "machines[0].scores[0].modes"],
+    [
+      "no is_nfc_verified",
+      withScore({ is_nfc_verified: undefined }),
+      "machines[0].scores[0].is_nfc_verified",
+    ],
+    [
+      "a string ball_in_progress",
+      withScore({ ball_in_progress: "yes" }),
+      "machines[0].scores[0].ball_in_progress",
+    ],
+    [
+      "a numeric tournament_id",
+      withScore({ tournament_id: 9 }),
+      "machines[0].scores[0].tournament_id",
+    ],
+    [
+      "a numeric player id",
+      withScore({ player: { username: "u", id: 1 } }),
+      "machines[0].scores[0].player.id",
+    ],
+    [
+      "a numeric initials",
+      withScore({ player: { username: "u", initials: 1 } }),
+      "machines[0].scores[0].player.initials",
+    ],
+    [
+      "a numeric avatar",
+      withScore({ player: { username: "u", avatar: 1 } }),
+      "machines[0].scores[0].player.avatar",
+    ],
     ["machines not an array", { ...UPDATE, payload: { machines: {} } }, "machines"],
     ["a null machine", { ...UPDATE, payload: { machines: [null] } }, "machines[0]"],
     ["an array machine", { ...UPDATE, payload: { machines: [[]] } }, "machines[0]"],
@@ -65,14 +100,22 @@ describe("parsePublication", () => {
 
   it.each([
     ["the full fixture", UPDATE],
-    ["no metadata", { ...UPDATE, metadata: undefined }],
     [
       "optional fields left out",
       withMachine({
         game_name: undefined,
-        game_ended: undefined,
         updated_at: undefined,
-        scores: [{ position: 1, score: 5, player: null }],
+        scores: [
+          { position: 1, score: 5, player: { username: "u" }, modes: [], is_nfc_verified: false },
+        ],
+      }),
+    ],
+    [
+      "nullable fields as null",
+      withScore({
+        ball_in_progress: null,
+        tournament_id: null,
+        player: { username: "u", avatar: null },
       }),
     ],
     [
@@ -137,6 +180,43 @@ describe("SseParser bound", () => {
     const parser = new SseParser(16);
     parser.push("data: 12345678\n");
     expect(() => parser.push("data: 12345678\n")).toThrow("SSE event too large");
+  });
+
+  it("counts the newline joined between fields, so empty data lines cannot grow without bound", () => {
+    const parser = new SseParser(100, 10_000);
+    const internal = parser as unknown as { data: string[]; dataLength: number };
+    let pushed = 0;
+    expect(() => {
+      for (; pushed < 10_000; pushed++) parser.push("data:\n");
+    }).toThrow("SSE event too large");
+    // Empty fields each cost their joining newline, so fewer than 100 were ever kept.
+    expect(pushed).toBeLessThan(100);
+    expect(internal.data.length).toBeLessThan(100);
+    expect(internal.dataLength).toBeLessThanOrEqual(100);
+  });
+
+  it("checks a whole chunk before keeping any of its fields", () => {
+    const parser = new SseParser(20);
+    const internal = parser as unknown as { data: string[] };
+    expect(() => parser.push("data: aaaaaa\ndata: bbbbbb\n")).toThrow("SSE event too large");
+    expect(internal.data).toEqual([]);
+  });
+
+  it("bounds the number of data fields in one event", () => {
+    const parser = new SseParser(1024, 4);
+    parser.push("data:\n".repeat(4));
+    expect(() => parser.push("data:\n")).toThrow("SSE event has too many data fields");
+    const fresh = new SseParser(1024, 4);
+    expect(fresh.push("data:\n".repeat(4) + "\n")).toEqual(["\n\n\n"]);
+  });
+
+  it("never retains event, id, retry, comment or unknown fields", () => {
+    const parser = new SseParser(64);
+    // Far more than 64 characters of other fields, one complete line at a time.
+    for (let i = 0; i < 100; i++) {
+      expect(parser.push("event: x\nid: 12345\nretry: 1000\n: comment\nfoo: bar\n")).toEqual([]);
+    }
+    expect(parser.push("data: ok\n\n")).toEqual(["ok"]);
   });
 
   it("resets the count after each event", () => {

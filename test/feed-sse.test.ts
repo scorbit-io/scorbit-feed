@@ -259,6 +259,48 @@ describe("live machine set (venue-scoped feeds, pending server support)", () => 
   });
 });
 
+describe("sse transport: channels", () => {
+  it.each([
+    ["wrapped, own channel", pubFrame(UPDATE)],
+    [
+      "top-level channel, as the uni protocol docs show",
+      `data: ${JSON.stringify({ channel: CREATED_SSE.channel, pub: { data: UPDATE } })}\n\n`,
+    ],
+    [
+      "no channel (the server-side subscription)",
+      `data: ${JSON.stringify({ pub: { data: UPDATE } })}\n\n`,
+    ],
+  ])("accepts a publication: %s", async (_label, frame) => {
+    const { api, feed, updates, errors } = setup();
+    const stream = queueStream(api);
+    feed.start();
+    await flush();
+    stream.push(frame);
+    await flush();
+    expect(updates).toEqual([UPDATE]);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([
+    ["wrapped", pubFrame(UPDATE, "data_feed:f_someone_else")],
+    [
+      "top-level",
+      `data: ${JSON.stringify({ channel: "data_feed:f_someone_else", pub: { data: UPDATE } })}\n\n`,
+    ],
+    ["a non-string channel", `data: ${JSON.stringify({ channel: 7, pub: { data: UPDATE } })}\n\n`],
+  ])("drops a publication for another channel (%s) with an error", async (_label, frame) => {
+    const { api, feed, updates, errors, statuses } = setup();
+    const stream = queueStream(api);
+    feed.start();
+    await flush();
+    stream.push(CONNECT_FRAME + frame);
+    await flush();
+    expect(updates).toEqual([]);
+    expect(errors.map((e) => e.message)).toEqual(["publication for another channel dropped"]);
+    expect(statuses.at(-1)).toBe("live");
+  });
+});
+
 describe("sse transport: disconnects and failures", () => {
   it("refreshes at once on a disconnect push after a stable session, and reconnects with the fresh token", async () => {
     const { api, feed, statuses } = setup();

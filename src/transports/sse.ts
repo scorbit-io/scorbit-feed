@@ -11,7 +11,7 @@ import type { Session, Transport, TransportHooks } from "./types.js";
  */
 export function sseTransport(fetchImpl: FetchLike) {
   return (hooks: TransportHooks): Transport => {
-    let current: { active: boolean; abort: AbortController } | null = null;
+    let current: { active: boolean; abort: AbortController; channel: string } | null = null;
 
     const close = () => {
       if (!current) return;
@@ -32,6 +32,7 @@ export function sseTransport(fetchImpl: FetchLike) {
       // uni_sse frames carry the reply directly, or wrapped in `push`.
       const wrapped = message as { push?: unknown } | null;
       const push = (wrapped?.push ?? wrapped) as {
+        channel?: unknown;
         connect?: unknown;
         disconnect?: { code?: unknown };
         pub?: { data?: unknown };
@@ -45,7 +46,15 @@ export function sseTransport(fetchImpl: FetchLike) {
       if (push?.connect) hooks.live();
       // hooks.live() may have stopped the feed, which closes this connection.
       if (!conn.active) return;
-      if (push?.pub) hooks.publication(push.pub.data);
+      if (!push?.pub) return;
+      // A publication names its channel on the push. One for any other channel
+      // is not this feed's, whatever it contains. A push with no channel is the
+      // server-side subscription's, which is only ever this feed's own.
+      if (push.channel !== undefined && push.channel !== conn.channel) {
+        hooks.error(new FeedError("publication for another channel dropped"));
+        return;
+      }
+      hooks.publication(push.pub.data);
     };
 
     const run = async (conn: NonNullable<typeof current>, session: Session) => {
@@ -85,7 +94,7 @@ export function sseTransport(fetchImpl: FetchLike) {
 
     const open = (session: Session) => {
       close();
-      const conn = { active: true, abort: new AbortController() };
+      const conn = { active: true, abort: new AbortController(), channel: session.channel };
       current = conn;
       // run() handles every failure itself.
       void run(conn, session);

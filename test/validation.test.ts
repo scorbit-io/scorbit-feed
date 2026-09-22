@@ -109,6 +109,16 @@ describe("createdProblem (create bodies)", () => {
     ["sdk without ws_endpoint", { ...CREATED_SDK, ws_endpoint: undefined }, "ws_endpoint"],
     ["sse without sse_endpoint", { ...CREATED_SSE, sse_endpoint: undefined }, "sse_endpoint"],
     ["no machines", { ...CREATED_SSE, machines: undefined }, "machines"],
+    [
+      "a machine without a game_name",
+      { ...CREATED_SSE, machines: [{ uuid: MACHINE_A }] },
+      "machines",
+    ],
+    ["no channel", { ...CREATED_SSE, channel: undefined }, "channel"],
+    ["an empty channel", { ...CREATED_SSE, channel: "" }, "channel"],
+    ["another feed's channel", { ...CREATED_SSE, channel: "data_feed:f_other" }, "channel"],
+    ["no ttl", { ...CREATED_SSE, ttl: undefined }, "ttl"],
+    ["a non-string delta", { ...CREATED_SDK, delta: 1 }, "delta"],
     ["a null machine", { ...CREATED_SSE, machines: [null] }, "machines"],
     ["a machine that is not an object", { ...CREATED_SSE, machines: ["uuid"] }, "machines"],
     ["a machine without a uuid", { ...CREATED_SSE, machines: [{ game_name: "X" }] }, "machines"],
@@ -136,7 +146,6 @@ describe("createdProblem (create bodies)", () => {
   it.each([
     ["sdk", CREATED_SDK],
     ["sse", CREATED_SSE],
-    ["a machine without a game_name", { ...CREATED_SSE, machines: [{ uuid: MACHINE_A }] }],
     ["no machines at all", { ...CREATED_SSE, machines: [] }],
   ])("accepts %s", (_label, body) => {
     expect(createdProblem(body)).toBeUndefined();
@@ -344,9 +353,54 @@ describe("redaction at the public boundary", () => {
     expect(error).not.toHaveProperty("cause");
   });
 
+  it.each([
+    ["one chunk", [2 * 1024 * 1024]],
+    ["many chunks", Array.from({ length: 40 }, () => 64 * 1024)],
+  ])("refuses a response body over the bound (%s) without buffering it", async (_label, sizes) => {
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const size = sizes[pulled++];
+        if (size === undefined) controller.close();
+        else controller.enqueue(new Uint8Array(size).fill(32));
+      },
+    });
+    const error = await request<never>(
+      async () => new Response(body, { status: 200 }),
+      "https://x.test/",
+      "GET",
+      FEED_TOKEN,
+    ).catch((e: Error) => e);
+    expect(error.message).toBe("request failed: response too large");
+    // Reading stops at the bound: 17 chunks of 64 KiB pass it, and the stream pulls at most one ahead.
+    expect(pulled).toBeLessThanOrEqual(Math.min(sizes.length, 17) + 1);
+  });
+
+  it("reads a body split across chunks, including a multi-byte character", async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ name: "Café ★" }));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      },
+    });
+    await expect(
+      request(
+        async () => new Response(body, { status: 200 }),
+        "https://x.test/",
+        "GET",
+        FEED_TOKEN,
+      ),
+    ).resolves.toEqual({ name: "Café ★" });
+  });
+
   it("redacts a body read that fails after the headers", async () => {
-    const response = json(200, {});
-    vi.spyOn(response, "text").mockRejectedValue(new Error(`reset ${FEED_TOKEN}`));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error(`reset ${FEED_TOKEN}`));
+      },
+    });
+    const response = new Response(body, { status: 200 });
     const error = await request<never>(
       async () => response,
       "https://x.test/",

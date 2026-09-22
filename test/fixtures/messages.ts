@@ -4,7 +4,7 @@
  * machine and score records). Frames follow Centrifugo's uni_sse format.
  */
 import type { FeedUpdate } from "../../src/types.js";
-import { MACHINE_A, MACHINE_B } from "./api.js";
+import { FEED_ID, MACHINE_A, MACHINE_B } from "./api.js";
 
 export const UPDATE: FeedUpdate = {
   type: "data_feed_update",
@@ -60,8 +60,8 @@ export const UPDATE: FeedUpdate = {
   },
 };
 
-/** A uni_sse `data:` payload carrying a publication, wrapped in `push` as the server sends it. */
-export const pubFrame = (data: unknown) =>
-  `data: ${JSON.stringify({ push: { channel: "data_feed:f_x", pub: { data } } })}\n\n`;
+/** A uni_sse `data:` payload carrying a publication on a channel, wrapped in `push`. */
+export const pubFrame = (data: unknown, channel = `data_feed:${FEED_ID}`) =>
+  `data: ${JSON.stringify({ push: { channel, pub: { data } } })}\n\n`;
 export const CONNECT_FRAME = `data: ${JSON.stringify({ connect: { client: "c-1", version: "6", subs: {} } })}\n\n`;
 export const DISCONNECT_FRAME = `data: ${JSON.stringify({ push: { disconnect: { code: 3005, reason: "token expired" } } })}\n\n`;

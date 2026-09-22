@@ -131,6 +131,28 @@ export function refusedRedirect(response: Response): FeedError | undefined {
     : undefined;
 }
 
+/** The largest API response body read; the API's replies are a few kilobytes. */
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/** A response body as text, refusing one larger than the bound instead of buffering it. */
+async function boundedText(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new FeedError("response too large");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
 /** One JSON request with a bearer credential. Resolves the body, or `undefined` on 204. */
 export async function request<T>(
   fetchImpl: FetchLike,
@@ -155,7 +177,7 @@ export async function request<T>(
     });
     const refused = refusedRedirect(response);
     if (refused) throw refused;
-    text = await response.text();
+    text = await boundedText(response);
   } catch (err) {
     // A custom fetch may put the request, bearer credential included, in its error.
     throw redactedError(err, "request failed");

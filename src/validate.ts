@@ -31,6 +31,8 @@ export function tokensProblem(body: unknown): string | undefined {
   if (b.channel !== undefined && b.channel !== `data_feed:${String(b.feed_id)}`) return "channel";
   if (!duration(b.heartbeat_interval)) return "heartbeat_interval";
   if (!duration(b.token_ttl)) return "token_ttl";
+  if (!duration(b.ttl)) return "ttl";
+  if (b.delta !== undefined && typeof b.delta !== "string") return "delta";
   if (b.transport !== undefined && b.transport !== "sdk" && b.transport !== "sse") {
     return "transport";
   }
@@ -53,7 +55,7 @@ export function tokensProblem(body: unknown): string | undefined {
 function machineOk(machine: unknown): boolean {
   if (!machine || typeof machine !== "object") return false;
   const m = machine as Body;
-  return nonEmpty(m.uuid) && (m.game_name === undefined || typeof m.game_name === "string");
+  return nonEmpty(m.uuid) && typeof m.game_name === "string";
 }
 
 /** The first problem in a create response body, or undefined. */
@@ -65,6 +67,8 @@ export function createdProblem(body: unknown): string | undefined {
     return "feed_token";
   }
   if (b.transport !== "sdk" && b.transport !== "sse") return "transport";
+  // Required by FeedInfo: tokensProblem only checks it when present.
+  if (b.channel !== `data_feed:${String(b.feed_id)}`) return "channel";
   if (b.transport === "sdk" && b.ws_endpoint === undefined) return "ws_endpoint";
   if (b.transport === "sse" && b.sse_endpoint === undefined) return "sse_endpoint";
   if (!Array.isArray(b.machines) || !b.machines.every(machineOk)) return "machines";
