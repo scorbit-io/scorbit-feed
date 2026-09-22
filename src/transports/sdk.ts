@@ -24,7 +24,12 @@ const TOKEN_ERRORS = new Set(["connectToken", "refreshToken"]);
  */
 export function sdkTransport(websocket?: unknown) {
   return (hooks: TransportHooks): Transport => {
-    let current: { client: Centrifuge; active: boolean } | null = null;
+    let current: {
+      client: Centrifuge;
+      active: boolean;
+      endpoint: string;
+      channel: string;
+    } | null = null;
     // The token each hook last handed the SDK: asking again means it was rejected or expired.
     const handedOut: Record<TokenKind, string | undefined> = {
       connectionToken: undefined,
@@ -60,7 +65,7 @@ export function sdkTransport(websocket?: unknown) {
         getToken: () => tokenFor("connectionToken"),
         ...(websocket ? { websocket } : {}),
       });
-      const conn = { client, active: true };
+      const conn = { client, active: true, endpoint: session.endpoint, channel: session.channel };
       current = conn;
       const drop = (code: number) => {
         conn.active = false;
@@ -110,6 +115,17 @@ export function sdkTransport(websocket?: unknown) {
       client.connect();
     };
 
-    return { open, refreshed: () => undefined, close };
+    // New tokens reach the SDK through getToken, so a refresh is normally a no-op.
+    // A new endpoint or channel cannot: rebuild the client (open() closes the old one first).
+    const refreshed = (session: Session) => {
+      if (
+        current &&
+        (current.endpoint !== session.endpoint || current.channel !== session.channel)
+      ) {
+        open(session);
+      }
+    };
+
+    return { open, refreshed, close };
   };
 }

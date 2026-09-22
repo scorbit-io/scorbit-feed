@@ -450,6 +450,75 @@ describe("sdk transport: synchronous events while opening", () => {
   });
 });
 
+describe("sdk transport: connection parameters that change", () => {
+  it("rebuilds the client when a heartbeat moves the endpoint, and ignores the old one", async () => {
+    const moved = "wss://moved.test.invalid/connection/websocket";
+    const { api, feed, updates } = setup();
+    api.queue("heartbeat", json(200, withEndpoint(heartbeatSdk(2), moved)));
+    feed.start();
+    const first = FakeCentrifuge.last;
+    first.sub.emit("subscribed", {});
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(FakeCentrifuge.instances).toHaveLength(2);
+    const second = FakeCentrifuge.last;
+    expect(second.endpoint).toBe(moved);
+    expect(second.options.token).toBe(jwt("conn2"));
+    expect(second.sub.options.token).toBe(jwt("sub2"));
+    expect(second.connectCalls).toBe(1);
+    // The old client was closed first, and nothing it says any more counts.
+    expect(first.disconnectCalls).toBe(1);
+    first.sub.emit("publication", { data: UPDATE });
+    first.emit("disconnected", { code: 3503, reason: "late" });
+    expect(updates).toEqual([]);
+    expect(api.count("heartbeat")).toBe(1);
+    second.sub.emit("publication", { data: UPDATE });
+    expect(updates).toEqual([UPDATE]);
+  });
+
+  it("rebuilds the client when a heartbeat names a different channel", async () => {
+    const { api, feed } = setup();
+    api.queue("heartbeat", json(200, { ...heartbeatSdk(2), channel: "data_feed:f_other" }));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(FakeCentrifuge.instances).toHaveLength(2);
+    expect(FakeCentrifuge.last.sub.channel).toBe("data_feed:f_other");
+    expect(FakeCentrifuge.instances[0]!.disconnectCalls).toBe(1);
+  });
+
+  it("keeps the same client when only the tokens change", async () => {
+    const { api, feed } = setup();
+    api.queue(
+      "heartbeat",
+      json(200, withEndpoint(heartbeatSdk(2), WS_ENDPOINT)),
+      json(200, { ...heartbeatSdk(3), channel: CREATED_SDK.channel }),
+    );
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(api.count("heartbeat")).toBe(2);
+    expect(FakeCentrifuge.instances).toHaveLength(1);
+    expect(FakeCentrifuge.last.disconnectCalls).toBe(0);
+    await expect(FakeCentrifuge.last.options.getToken()).resolves.toBe(jwt("conn3"));
+  });
+
+  it("does not open a client from a refresh after the connection dropped", async () => {
+    const moved = "wss://moved.test.invalid/connection/websocket";
+    const { api, feed } = setup();
+    const pending = deferred<Response>();
+    api.queue("heartbeat", () => pending.promise);
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    // The connection drops while the scheduled heartbeat is in flight: the
+    // refresh reopens exactly once, on the new endpoint.
+    FakeCentrifuge.last.emit("disconnected", { code: 3503, reason: "force disconnect" });
+    pending.resolve(json(200, withEndpoint(heartbeatSdk(2), moved)));
+    await flush();
+    expect(FakeCentrifuge.instances).toHaveLength(2);
+    expect(FakeCentrifuge.last.endpoint).toBe(moved);
+    expect(FakeCentrifuge.last.connectCalls).toBe(1);
+  });
+});
+
 describe("sdk transport: stop", () => {
   it("deletes the feed with the feed token, clears timers and disconnects", async () => {
     const { api, feed, ended, statuses } = setup();
