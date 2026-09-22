@@ -324,6 +324,35 @@ describe("scorbit-feed agent cleanup", () => {
     h.noSecrets();
   });
 
+  it.each([
+    ["succeeds", 204],
+    ["fails", 500],
+  ])(
+    "deletes the feed it just created if anything fails before the agent starts (delete %s)",
+    async (_label, deleteStatus) => {
+      const h = harness({ SCORBIT_API_KEY: API_KEY });
+      const deps = h as unknown as { lines: string[] };
+      h.api.queue("create", json(201, CREATED_SSE));
+      h.api.queue(
+        "delete",
+        deleteStatus === 204 ? new Response(null, { status: 204 }) : json(deleteStatus),
+      );
+      // A log sink that fails on the "created feed" line.
+      const original = deps.lines.push.bind(deps.lines);
+      deps.lines.push = (...items: string[]) => {
+        if (items.some((line) => line.startsWith("created feed"))) throw new Error("log sink down");
+        return original(...items);
+      };
+      await h.run([...base, "--transport", "sse"]);
+      expect(h.exits).toEqual([1]);
+      expect(h.lines).toContain("error: log sink down");
+      const del = h.api.calls.find((c) => c.key === "delete")!;
+      expect(del.headers.Authorization).toBe(`Bearer ${FEED_TOKEN}`);
+      expect(h.api.count("sse")).toBe(0);
+      h.noSecrets();
+    },
+  );
+
   it("does not warn about the network for an upper-case loopback host", async () => {
     const h = harness({ SCORBIT_API_KEY: API_KEY });
     h.api.queue("create", json(201, CREATED_SSE));

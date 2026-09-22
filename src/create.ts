@@ -38,6 +38,21 @@ const inBrowser = () =>
   typeof document !== "undefined" ||
   typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== "undefined";
 
+function resolve(options: CreateOptions): { fetchImpl: FetchLike; baseUrl: string } {
+  return {
+    fetchImpl: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
+    baseUrl: checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL),
+  };
+}
+
+/** Best-effort DELETE with the API key, for a feed created but not usable. */
+async function deleteWithKey(options: CreateOptions, feedId: string): Promise<void> {
+  const { fetchImpl, baseUrl } = resolve(options);
+  await request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", options.apiKey).catch(
+    () => undefined,
+  );
+}
+
 /** Create a feed with the `sb_live_` API key. Server-side only. */
 export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
   if (inBrowser() && !options.dangerouslyAllowBrowser) {
@@ -54,8 +69,7 @@ export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
       "createFeed: `machines` narrows the key's scope; omit it, or list at least one uuid.",
     );
   }
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const baseUrl = checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL);
+  const { fetchImpl, baseUrl } = resolve(options);
   const created = await request<unknown>(
     fetchImpl,
     feedUrl(baseUrl),
@@ -68,11 +82,7 @@ export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
   if (problem) {
     // The server may have created a feed we cannot use: delete it with the key, best effort.
     const feedId = (created as { feed_id?: unknown } | undefined)?.feed_id;
-    if (typeof feedId === "string" && feedId) {
-      await request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", options.apiKey).catch(
-        () => undefined,
-      );
-    }
+    if (typeof feedId === "string" && feedId) await deleteWithKey(options, feedId);
     throw new FeedError(`malformed create response: bad ${problem}`);
   }
   return created as CreatedFeed;
@@ -89,13 +99,19 @@ export async function openFeed(
   options: OpenOptions,
 ): Promise<{ feed: Feed; created: CreatedFeed }> {
   const created = await createFeed(options);
-  const feed = attachFeed({
-    feedId: created.feed_id,
-    feedToken: created.feed_token,
-    baseUrl: options.baseUrl,
-    fetch: options.fetch,
-    websocket: options.websocket,
-    initialTokens: created,
-  });
-  return { feed, created };
+  try {
+    const feed = attachFeed({
+      feedId: created.feed_id,
+      feedToken: created.feed_token,
+      baseUrl: options.baseUrl,
+      fetch: options.fetch,
+      websocket: options.websocket,
+      initialTokens: created,
+    });
+    return { feed, created };
+  } catch (err) {
+    // The feed exists on the server but cannot be used here: do not leak it.
+    await deleteWithKey(options, created.feed_id);
+    throw err;
+  }
 }

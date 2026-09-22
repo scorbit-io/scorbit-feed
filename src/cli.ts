@@ -134,7 +134,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
 
   const apiKey = deps.env.SCORBIT_API_KEY;
   const feedToken = deps.env.SCORBIT_FEED_TOKEN;
-  let feed: Feed;
+  let feed!: Feed;
   let created = false;
   try {
     if (options["feed-id"] !== undefined) {
@@ -162,11 +162,14 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
         fetch: deps.fetch,
       });
       feed = opened.feed;
+      // Set at once: anything that fails from here on must delete the feed.
       created = true;
       const names = opened.created.machines.map((m) => m.game_name).join(", ");
       log(`created feed ${feed.feedId} (${opened.created.transport}) over ${names}`);
     }
   } catch (err) {
+    // `created` is set only once `feed` exists.
+    if (created) await feed.stop().catch(() => undefined);
     log(`error: ${(err as Error).message}`);
     deps.exit(err instanceof UsageError ? 2 : 1);
     return undefined;
