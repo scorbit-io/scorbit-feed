@@ -10,7 +10,7 @@ All notable changes to this project are documented here. The format follows
 
 - `createFeed`, `attachFeed` and `openFeed`: create a data feed with an `sb_live_`
   API key (server-side only) and attach to it with its `sbf_` feed token
-  (browser-safe).
+  (browser-safe, but never in a URL).
 - Two transports: `sdk` (the Centrifugo SDK over WebSocket, with fossil delta)
   and `sse` (Centrifugo uni_sse read with `fetch`, the connect command sent in a
   POST body so the token stays out of URLs).

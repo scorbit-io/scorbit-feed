@@ -28,7 +28,7 @@ only with a one-line reason next to it.
   them.
 - **Never let a credential reach a log line, an error message, a URL, or an
   agent response.** The `sb_live_` key is server-side only; the `sbf_` token is
-  the only browser-safe credential. Test fixtures use obviously fake values.
+  the only browser-safe credential, and never goes in a URL. Test fixtures use obviously fake values.
 - A test that proves a guard should fail when the guard is removed. Check that
   it does.
 - Keep message and response types in step with the Scorbit API's data-feed

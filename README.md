@@ -26,10 +26,10 @@ need the API key.
 
 There are two credentials, and the difference between them matters.
 
-| Credential | Prefix     | What it can do                                    | Where it may live                             |
-| ---------- | ---------- | ------------------------------------------------- | --------------------------------------------- |
-| API key    | `sb_live_` | Create and manage feeds for your account          | **Server-side only.** Never ship to a browser |
-| Feed token | `sbf_`     | Refresh and delete **one** feed, and nothing else | Safe in a browser or an OBS source URL        |
+| Credential | Prefix     | What it can do                                    | Where it may live                                                       |
+| ---------- | ---------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
+| API key    | `sb_live_` | Create and manage feeds for your account          | **Server-side only.** Never ship to a browser                           |
+| Feed token | `sbf_`     | Refresh and delete **one** feed, and nothing else | May reach a browser, but **never in a URL**: not a page, source or link |
 
 The library enforces this:
 
@@ -41,6 +41,20 @@ The library enforces this:
 
 A feed token is returned once, when the feed is created. Keep it if you want to
 attach to the feed again later.
+
+The feed token is browser-safe only relative to the API key: it can do little,
+but anyone who holds it can read the feed and delete it. Keep it out of URLs,
+query strings and OBS browser-source addresses, which end up in logs, history,
+screenshots and shared scene collections. Two supported ways to give a page
+what it needs:
+
+- **Run the agent** (`scorbit-feed`, below). It holds the feed and the token
+  itself and serves the page only feed data on `localhost`. The page never sees
+  a credential. This is the right choice for OBS.
+- **Serve the page from your own server**, which creates the feed and hands the
+  page `feed_id`, `feed_token` and the endpoint in its response body (for
+  example an authenticated `fetch` from the page, or a value rendered into the
+  page), never in the page's address.
 
 ### Key scope and machine sets (planned server support)
 
@@ -96,7 +110,8 @@ await feed.stop();
 ### Browser: attach with the feed token
 
 Create the feed on your server, then hand the browser only `feed_id`,
-`feed_token` and the endpoint:
+`feed_token` and the endpoint, in a response body rather than a URL (see
+[Credentials](#credentials)):
 
 ```ts
 import { attachFeed } from "@scorbit/feed";
