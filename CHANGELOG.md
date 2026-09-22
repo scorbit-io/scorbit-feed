@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format follows
 - The `scorbit-feed` agent: serves `/state`, `/events` and `/healthz` on
   localhost (loopback `Host` only), optionally serves overlay files (known file
   types, no dotfiles), and deletes a feed it created on exit.
-- A starter overlay in `templates/overlay/` with an attribution slot.
+- A starter overlay in `templates/overlay/` whose attribution slot shows the
+  Scorbit logo, as the [developer terms](https://scorbit.io/developer-terms-of-use/)
+  require.
+- Scorbit logo files in `assets/brand/` (repository only; trademarks, not MIT
+  licensed).
 - ESM build with type declarations, and an IIFE build of the attach-only browser
   subset (global `ScorbitFeed`).

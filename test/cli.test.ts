@@ -178,7 +178,10 @@ describe("scorbit-feed agent (create mode)", () => {
     expect(JSON.parse(state)).toMatchObject({ status: "live", machines: UPDATE.payload.machines });
     const health = await (await fetch(`${handle.url}/healthz`)).text();
     const overlay = await (await fetch(`${handle.url}/`)).text();
-    expect(overlay).toContain("Powered by Scorbit");
+    expect(overlay).toContain('alt="Powered by Scorbit"');
+    const logo = await fetch(`${handle.url}/scorbit_lockup-horizontal_multi.svg`);
+    expect(logo.headers.get("content-type")).toBe("image/svg+xml");
+    expect(await logo.text()).toContain("<svg");
     for (const body of [state, health, overlay]) {
       for (const secret of SECRETS) expect(body).not.toContain(secret);
     }

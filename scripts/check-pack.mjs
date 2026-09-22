@@ -17,6 +17,7 @@ const EXPECTED = [
   "templates/overlay/index.html",
   "templates/overlay/overlay.css",
   "templates/overlay/overlay.js",
+  "templates/overlay/scorbit_lockup-horizontal_multi.svg",
 ];
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";

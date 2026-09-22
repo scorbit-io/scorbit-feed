@@ -83,6 +83,12 @@ body {
   position: fixed;
   right: 12px;
   bottom: 8px;
-  font-size: 0.75rem;
-  color: var(--muted);
+  line-height: 0;
+}
+
+/* The brand guidelines' digital minimum for the horizontal lockup is 30px tall. */
+.attribution img {
+  display: block;
+  height: 30px;
+  width: auto;
 }

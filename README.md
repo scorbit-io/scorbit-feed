@@ -266,10 +266,13 @@ restyle it freely.
 
 ## Branding and attribution
 
-Scorbit's developer terms require visible attribution wherever feed data is
-displayed. The starter overlay carries a marked attribution slot ("Powered by
-Scorbit"); keep it visible if you build on it. The developer terms URL and the
-official logo asset are still to be published (TBD).
+Scorbit's [developer terms](https://scorbit.io/developer-terms-of-use/) require
+visible attribution wherever feed data is displayed. The starter overlay's
+attribution slot shows the Scorbit logo (alt text "Powered by Scorbit"); keep it
+visible if you build on it. The logo files and how to use them are in
+[`assets/brand/`](assets/brand/README.md); the starter overlay ships one of them,
+`scorbit_lockup-horizontal_multi.svg`, whose built-in black strap keeps it
+legible over video.
 
 ## Development
 
@@ -283,5 +286,10 @@ See `CONTRIBUTING.md`. Security reports: see `SECURITY.md`.
 ## License
 
 The code in this repository is MIT licensed (see `LICENSE`). Access to the Scorbit
-data feed itself is governed separately by Scorbit's developer terms, which
-include the branding and attribution requirements above.
+data feed itself is governed separately by Scorbit's
+[developer terms](https://scorbit.io/developer-terms-of-use/), which include the
+branding and attribution requirements above.
+
+The Scorbit name and logos, including the files in `assets/brand/` and the logo
+in `templates/overlay/`, are trademarks of Scorbit and are **not** covered by the
+MIT license. Use them only as the developer terms allow.
