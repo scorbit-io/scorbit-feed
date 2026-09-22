@@ -345,6 +345,75 @@ describe("heartbeat validation in the feed", () => {
     expect(ended).toEqual(["stopped"]);
   });
 
+  it("keeps its own copy of the tokens in hand: changing the caller's object has no effect", async () => {
+    const api = fakeApi();
+    api.queue("sse", (init) => sseStream().respond(init));
+    const created = structuredClone(CREATED_SSE);
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: created,
+    });
+    // After construction, redirect everything the caller still holds.
+    created.sse_endpoint = "https://evil.example/uni_sse";
+    created.connection_token = "stolen";
+    created.heartbeat_interval = 1;
+    created.machines[0]!.uuid = "someone-elses-machine";
+    created.machines.push({ uuid: "extra", game_name: "x" });
+    expect(feed.machines).toEqual([MACHINE_A]);
+    feed.start();
+    await flush();
+    expect(api.calls[0]!.url).toBe(SSE_ENDPOINT);
+    expect(api.calls[0]!.body).toEqual({ token: CREATED_SSE.connection_token });
+    // The next refresh is on the original interval, not the one written afterwards.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.count("heartbeat")).toBe(0);
+    await feed.stop({ deleteFeed: false });
+  });
+
+  it("reports tokens in hand that it ignores, once, with the field only", async () => {
+    const api = fakeApi();
+    api.queue("heartbeat", json(200, heartbeatSse(2)));
+    api.queue("sse", (init) => sseStream().respond(init));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      endpoint: SSE_ENDPOINT,
+      initialTokens: {
+        ...CREATED_SSE,
+        feed_id: "f_someone_else",
+        channel: "data_feed:f_someone_else",
+      },
+    });
+    const errors: string[] = [];
+    feed.on("error", (e) => errors.push(e.message));
+    feed.start();
+    await flush();
+    expect(errors).toEqual(["initialTokens ignored: bad feed_id"]);
+    await feed.stop({ deleteFeed: false });
+  });
+
+  it("does nothing more if an error listener stops the feed over ignored tokens", async () => {
+    const api = fakeApi();
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: { ...CREATED_SSE, token_ttl: 0.5 },
+    });
+    feed.on("error", () => void feed.stop({ deleteFeed: false }));
+    feed.start();
+    await flush();
+    expect(api.calls).toHaveLength(0);
+    expect(feed.status).toBe("ended");
+  });
+
   it("seeds its machines only from tokens in hand that it accepts", () => {
     const own = attachFeed({ feedId: FEED_ID, feedToken: FEED_TOKEN, initialTokens: CREATED_SSE });
     expect(own.machines).toEqual([MACHINE_A]);

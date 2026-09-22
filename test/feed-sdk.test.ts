@@ -257,6 +257,15 @@ describe("sdk transport: token refresh", () => {
     expect(ended).toEqual(["ended"]);
   });
 
+  it("tells the SDK to give up when an error listener stops the feed during a failed refresh", async () => {
+    const { api, feed } = setup();
+    api.queue("heartbeat", json(503));
+    feed.on("error", () => void feed.stop({ deleteFeed: false }));
+    feed.start();
+    await expect(FakeCentrifuge.last.options.getToken()).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("makes the SDK retry (plain error) when a refresh fails transiently", async () => {
     const { api, feed, errors } = setup();
     api.queue("heartbeat", json(503, { detail: "unavailable" }));

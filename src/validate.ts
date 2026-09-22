@@ -9,10 +9,11 @@ import type { FeedMachineRef } from "./types.js";
 type Body = Record<string, unknown>;
 
 const nonEmpty = (value: unknown) => typeof value === "string" && value.length > 0;
-// A duration in seconds that a timer can actually wait: setTimeout clamps
-// anything above 2^31-1 ms to ~1 ms, which would turn a long wait into a storm.
+// A duration in whole seconds, as the serializer's IntegerFields send it: at
+// least 1 (a fraction would reschedule every few milliseconds) and at most
+// what a timer can wait (setTimeout turns anything above 2^31-1 ms into ~1 ms).
 const duration = (value: unknown) =>
-  typeof value === "number" && value > 0 && value <= TIMER_MAX_SECONDS;
+  Number.isInteger(value) && (value as number) >= 1 && (value as number) <= TIMER_MAX_SECONDS;
 
 function endpointOk(value: unknown, scheme: RegExp): boolean {
   if (typeof value !== "string" || !scheme.test(value)) return false;

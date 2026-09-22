@@ -100,6 +100,7 @@ export class Feed extends Emitter<FeedEvents> {
   private readonly fetchImpl: FetchLike;
   private readonly websocket: unknown;
   private readonly initialTokens: FeedTokens | undefined;
+  private readonly initialProblem: string | undefined;
 
   private currentStatus: FeedStatus = "idle";
   private tokens: FeedTokens | undefined;
@@ -140,10 +141,11 @@ export class Feed extends Emitter<FeedEvents> {
     // Nothing from tokens in hand is trusted (not their endpoint, not their
     // machines) unless they pass the same check that decides whether they are
     // applied: valid, and for this feed. Otherwise start() makes a first heartbeat.
-    const initial =
-      options.initialTokens && !this.replyProblem(options.initialTokens)
-        ? options.initialTokens
-        : undefined;
+    // Validated and kept as a copy: the caller may still hold (and change) the
+    // original, for example the `created` object openFeed returns.
+    const copy = options.initialTokens && copyTokens(options.initialTokens);
+    this.initialProblem = copy && this.replyProblem(copy);
+    const initial = copy && !this.initialProblem ? copy : undefined;
     this.initialTokens = initial;
     this.endpoint = options.endpoint ?? initial?.ws_endpoint ?? initial?.sse_endpoint;
     const refs = (initial as { machines?: unknown } | undefined)?.machines;
@@ -164,6 +166,12 @@ export class Feed extends Emitter<FeedEvents> {
     if (this.started || this.finished) return;
     this.started = true;
     if (!this.setStatus("connecting")) return;
+    if (
+      this.initialProblem &&
+      !this.emitAlive("error", new FeedError(`initialTokens ignored: bad ${this.initialProblem}`))
+    ) {
+      return;
+    }
     if (this.initialTokens && this.apply(this.initialTokens)) return;
     this.reopenPending = true;
     void this.refresh();
@@ -316,7 +324,7 @@ export class Feed extends Emitter<FeedEvents> {
       }
       const retryAfter = err instanceof FeedHttpError ? (err.retryAfter ?? 0) : 0;
       this.fail(redactedError(err, "heartbeat failed"), retryAfter * 1000);
-      return true;
+      return !this.finished;
     }
     if (this.finished) return false;
     // A malformed answer is a failed refresh, retried with backoff, never trusted.
@@ -429,6 +437,17 @@ export class Feed extends Emitter<FeedEvents> {
       ? sdkTransport(this.websocket)(hooks)
       : sseTransport(this.fetchImpl)(hooks);
   }
+}
+
+/** A copy of a token set deep enough that later changes to the original cannot reach it. */
+function copyTokens(tokens: FeedTokens | FeedInfo): FeedTokens | FeedInfo {
+  const machines: unknown = (tokens as { machines?: unknown }).machines;
+  if (!Array.isArray(machines)) return { ...tokens };
+  // Each ref is copied too; validation decides later whether they are usable.
+  const copied: unknown[] = machines.map((m: unknown) =>
+    m && typeof m === "object" ? { ...m } : m,
+  );
+  return { ...tokens, machines: copied } as FeedInfo;
 }
 
 /**

@@ -20,11 +20,22 @@ describe("durations in token replies", () => {
     expect(TIMER_MAX_SECONDS).toBe(2147483);
   });
 
-  it.each(["heartbeat_interval", "token_ttl"] as const)("%s: accepted up to the limit", (field) => {
-    expect(tokensProblem({ ...heartbeatSse(1), [field]: TIMER_MAX_SECONDS })).toBeUndefined();
-  });
+  it.each(["heartbeat_interval", "token_ttl", "ttl"] as const)(
+    "%s: whole seconds from 1 up to the limit are accepted",
+    (field) => {
+      expect(tokensProblem({ ...heartbeatSse(1), [field]: 1 })).toBeUndefined();
+      expect(tokensProblem({ ...heartbeatSse(1), [field]: TIMER_MAX_SECONDS })).toBeUndefined();
+    },
+  );
 
   it.each([
+    ["heartbeat_interval", 0],
+    ["heartbeat_interval", 0.5],
+    ["heartbeat_interval", 1.5],
+    ["heartbeat_interval", 0.001],
+    ["token_ttl", 0.5],
+    ["ttl", 1.5],
+    ["ttl", 0],
     ["heartbeat_interval", TIMER_MAX_SECONDS + 1],
     ["heartbeat_interval", 1e12],
     ["heartbeat_interval", Number.MAX_VALUE],
