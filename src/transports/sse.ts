@@ -1,4 +1,11 @@
-import { FeedError, type FetchLike, NO_REDIRECT, redactedError, refusedRedirect } from "../http.js";
+import {
+  FeedError,
+  type FetchLike,
+  NO_REDIRECT,
+  discard,
+  redactedError,
+  refusedRedirect,
+} from "../http.js";
 import { SseParser } from "../sse-parser.js";
 import type { Session, Transport, TransportHooks } from "./types.js";
 
@@ -66,10 +73,14 @@ export function sseTransport(fetchImpl: FetchLike) {
           signal: conn.abort.signal,
           redirect: NO_REDIRECT,
         });
-        if (!conn.active) return;
+        if (!conn.active) return discard(response);
         const refused = refusedRedirect(response);
-        if (refused) throw refused;
+        if (refused) {
+          discard(response);
+          throw refused;
+        }
         if (!response.ok || !response.body) {
+          discard(response);
           throw new FeedError(`SSE endpoint answered ${response.status}`);
         }
         const reader = response.body.getReader();

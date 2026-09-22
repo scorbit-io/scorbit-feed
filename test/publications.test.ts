@@ -265,7 +265,37 @@ describe("SseParser bound", () => {
   it("counts the current event's fields together with the unterminated line", () => {
     const parser = new SseParser(32);
     parser.push("data: " + "a".repeat(20) + "\n"); // kept: 20
-    expect(() => parser.push("data: " + "b".repeat(10))).toThrow("SSE event too large"); // 20 + 16
+    // 20 kept + 1 newline + 12 = 33 > 32, counted as the line would be once complete.
+    expect(() => parser.push("data: " + "b".repeat(12))).toThrow("SSE event too large");
+  });
+
+  it.each([0, 3, 6, 10, 26])(
+    "accepts a line exactly at the bound however it is split (at %i)",
+    (cut) => {
+      const line = "data: " + "x".repeat(20) + "\n\n";
+      const parser = new SseParser(20);
+      const events = [...parser.push(line.slice(0, cut)), ...parser.push(line.slice(cut))];
+      expect(events).toEqual(["x".repeat(20)]);
+    },
+  );
+
+  it.each([0, 3, 6, 10, 27])(
+    "refuses a line one over the bound however it is split (at %i)",
+    (cut) => {
+      const line = "data: " + "x".repeat(21) + "\n\n";
+      const parser = new SseParser(20);
+      expect(() => {
+        parser.push(line.slice(0, cut));
+        parser.push(line.slice(cut));
+      }).toThrow("SSE event too large");
+    },
+  );
+
+  it("counts a pending non-data line whole, and a trailing CR not at all", () => {
+    expect(() => new SseParser(8).push(": " + "c".repeat(10))).toThrow("SSE event too large");
+    const parser = new SseParser(20);
+    expect(parser.push("data: " + "x".repeat(20) + "\r")).toEqual([]);
+    expect(parser.push("\n\n")).toEqual(["x".repeat(20)]);
   });
 
   it("bounds the number of data fields in one event", () => {

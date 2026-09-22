@@ -122,6 +122,11 @@ function detailOf(body: unknown): string | undefined {
  */
 export const NO_REDIRECT = "manual" as const;
 
+/** Release a response body that will not be read, so its connection is not held open. */
+export function discard(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
+}
+
 /** A redirect the request refused (manual mode: a 3xx, or an opaque redirect in browsers). */
 export function refusedRedirect(response: Response): FeedError | undefined {
   const redirected =
@@ -176,7 +181,10 @@ export async function request<T>(
       redirect: NO_REDIRECT,
     });
     const refused = refusedRedirect(response);
-    if (refused) throw refused;
+    if (refused) {
+      discard(response);
+      throw refused;
+    }
     text = await boundedText(response);
   } catch (err) {
     // A custom fetch may put the request, bearer credential included, in its error.

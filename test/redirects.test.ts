@@ -117,3 +117,63 @@ describe("redirects are refused", () => {
     await feed.stop({ deleteFeed: false });
   });
 });
+
+describe("unread bodies are released", () => {
+  function tracked(status: number, cancelFails = false) {
+    const state = { cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        state.cancelled = true;
+        if (cancelFails) throw new Error("cancel failed");
+      },
+    });
+    return { response: new Response(body, { status }), state };
+  }
+
+  it.each([
+    ["a refused redirect on an API request", 307, "create"],
+    ["a refused redirect on the SSE connect", 307, "sse"],
+    ["a refused SSE connect", 401, "sse"],
+  ] as const)("cancels the body of %s", async (_label, status, key) => {
+    const api = fakeApi();
+    const { response, state } = tracked(status);
+    api.queue(key, response);
+    if (key === "create") {
+      await expect(
+        createFeed({ apiKey: API_KEY, machines: [MACHINE_A], baseUrl: BASE_URL, fetch: api.fetch }),
+      ).rejects.toThrow();
+    } else {
+      const { feed } = attached(api);
+      feed.start();
+      await flush();
+      await feed.stop({ deleteFeed: false });
+    }
+    await flush();
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("cancels the body of an SSE response that arrives after stop", async () => {
+    const api = fakeApi();
+    const { response, state } = tracked(200);
+    let release!: () => void;
+    api.queue("sse", () => new Promise<Response>((resolve) => (release = () => resolve(response))));
+    const { feed } = attached(api);
+    feed.start();
+    await flush();
+    await feed.stop({ deleteFeed: false });
+    release();
+    await flush();
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("does not let a failing cancel escape", async () => {
+    const api = fakeApi();
+    const { response, state } = tracked(308, true);
+    api.queue("create", response);
+    await expect(
+      createFeed({ apiKey: API_KEY, machines: [MACHINE_A], baseUrl: BASE_URL, fetch: api.fetch }),
+    ).rejects.toThrow(/refused a redirect/);
+    await flush();
+    expect(state.cancelled).toBe(true);
+  });
+});

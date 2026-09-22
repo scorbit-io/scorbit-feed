@@ -7,20 +7,27 @@ import { FeedError } from "./http.js";
  * are dropped as soon as their line is read; they are never retained.
  *
  * Memory is bounded per event, not per chunk, so one chunk may carry any number
- * of complete events:
+ * of complete events. Sizes are in UTF-16 code units (string length):
  * - an event's `data` fields, counted with the newline the join puts between
  *   them, may not pass `maxEvent`, checked before each field is kept;
  * - an event may have at most `maxFields` data fields;
- * - what stays buffered between chunks (the unterminated line plus the current
- *   event's fields) may not pass `maxEvent` either.
+ * - an unterminated line carried to the next chunk is counted exactly as it
+ *   would be once complete (a `data:` line by its value, anything else whole),
+ *   so a line is accepted or refused the same way however it is split.
  */
+/** A `data:` line's value, without the one optional leading space. */
+function dataOf(line: string): string {
+  const value = line.slice(5);
+  return value.startsWith(" ") ? value.slice(1) : value;
+}
+
 export class SseParser {
   private buffer = "";
   private data: string[] = [];
   private dataLength = 0;
 
   /**
-   * @param maxEvent The most characters one event may take.
+   * @param maxEvent The most UTF-16 code units one event's data may take.
    * @param maxFields The most `data` fields one event may have.
    */
   constructor(
@@ -46,10 +53,8 @@ export class SseParser {
         this.data = [];
         this.dataLength = 0;
       } else if (line.startsWith("data:")) {
-        const value = line.slice(5);
-        const data = value.startsWith(" ") ? value.slice(1) : value;
-        // The join adds a newline before every field but the first.
-        const cost = data.length + (this.data.length ? 1 : 0);
+        const data = dataOf(line);
+        const cost = this.costOf(data);
         if (this.dataLength + cost > this.maxEvent) throw new FeedError("SSE event too large");
         if (this.data.length >= this.maxFields) {
           throw new FeedError("SSE event has too many data fields");
@@ -59,9 +64,15 @@ export class SseParser {
       }
     }
     this.buffer = text.slice(pos);
-    if (this.buffer.length + this.dataLength > this.maxEvent) {
-      throw new FeedError("SSE event too large");
-    }
+    // A trailing lone CR only waits to see whether an LF follows.
+    const pending = this.buffer.endsWith("\r") ? this.buffer.slice(0, -1) : this.buffer;
+    const tail = pending.startsWith("data:") ? this.costOf(dataOf(pending)) : pending.length;
+    if (this.dataLength + tail > this.maxEvent) throw new FeedError("SSE event too large");
     return events;
+  }
+
+  /** What keeping `data` adds: its length, plus the newline the join puts before every field but the first. */
+  private costOf(data: string): number {
+    return data.length + (this.data.length ? 1 : 0);
   }
 }
