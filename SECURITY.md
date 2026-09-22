@@ -2,10 +2,9 @@
 
 ## Reporting a vulnerability
 
-Please report security problems privately, not in a public issue.
-
-Use GitHub's private vulnerability reporting: open this repository's
-**Security** tab and choose **Report a vulnerability**.
+Please report security problems privately, not in a public issue: email
+**infosec@scorbit.io**, or use GitHub's private vulnerability reporting (this
+repository's **Security** tab, then **Report a vulnerability**).
 
 Include what you found, how to reproduce it, and its impact. We will acknowledge
 the report and keep you informed while it is fixed.
