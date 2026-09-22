@@ -77,13 +77,19 @@ export interface FeedMachineState {
   updated_at?: string | null;
 }
 
+/** Always carries created_at and updated_at; the rest only when set. */
 export interface FeedMessageMetadata {
   created_at: string;
   updated_at: string;
+  /** Game uuid. */
   game?: string;
+  /** Machine uuid. */
   machine?: string;
+  /** An integer. */
   sequence?: number;
+  /** Game variant uuid. */
   variant?: string;
+  /** Venue uuid. */
   venue?: string;
 }
 

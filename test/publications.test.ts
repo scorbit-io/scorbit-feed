@@ -27,6 +27,22 @@ describe("parsePublication", () => {
       "metadata.updated_at",
     ],
     ["no metadata", { ...UPDATE, metadata: undefined }, "metadata"],
+    [
+      "a string sequence",
+      { ...UPDATE, metadata: { ...UPDATE.metadata, sequence: "3" } },
+      "metadata.sequence",
+    ],
+    [
+      "a fractional sequence",
+      { ...UPDATE, metadata: { ...UPDATE.metadata, sequence: 1.5 } },
+      "metadata.sequence",
+    ],
+    [
+      "a numeric venue",
+      { ...UPDATE, metadata: { ...UPDATE.metadata, venue: 12 } },
+      "metadata.venue",
+    ],
+    ["a null game", { ...UPDATE, metadata: { ...UPDATE.metadata, game: null } }, "metadata.game"],
     ["no metadata.created_at", { ...UPDATE, metadata: { updated_at: "x" } }, "metadata.created_at"],
     ["no payload", { type: "data_feed_update", metadata: UPDATE.metadata }, "machines"],
     ["no game_ended", withMachine({ game_ended: undefined }), "machines[0].game_ended"],
@@ -123,6 +139,20 @@ describe("parsePublication", () => {
       withMachine({ updated_at: null, scores: [{ ...score, ball: null }] }),
     ],
     ["no machines", { ...UPDATE, payload: { machines: [] } }],
+    [
+      "every optional metadata field",
+      {
+        ...UPDATE,
+        metadata: {
+          ...UPDATE.metadata,
+          game: "44444444-4444-4444-8444-444444444444",
+          machine: "55555555-5555-4555-8555-555555555555",
+          sequence: 42,
+          variant: "66666666-6666-4666-8666-666666666666",
+          venue: "77777777-7777-4777-8777-777777777777",
+        },
+      },
+    ],
   ])("accepts %s", (_label, data) => {
     expect(parsePublication(data)).toEqual({ update: data as FeedUpdate });
   });
@@ -196,17 +226,46 @@ describe("SseParser bound", () => {
     expect(() => {
       for (; pushed < 10_000; pushed++) parser.push("data:\n");
     }).toThrow("SSE event too large");
-    // Empty fields each cost their joining newline, so fewer than 100 were ever kept.
-    expect(pushed).toBeLessThan(100);
-    expect(internal.data.length).toBeLessThan(100);
-    expect(internal.dataLength).toBeLessThanOrEqual(100);
+    // Each empty field after the first costs its joining newline: 101 fit in 100.
+    expect(pushed).toBe(101);
+    expect(internal.data.length).toBe(101);
+    expect(internal.dataLength).toBe(100);
   });
 
-  it("checks a whole chunk before keeping any of its fields", () => {
-    const parser = new SseParser(20);
+  it("refuses an event whose fields pass the bound, before keeping the field", () => {
+    const parser = new SseParser(12);
     const internal = parser as unknown as { data: string[] };
+    // 6 + 1 newline + 6 = 13 > 12, in one chunk.
     expect(() => parser.push("data: aaaaaa\ndata: bbbbbb\n")).toThrow("SSE event too large");
-    expect(internal.data).toEqual([]);
+    expect(internal.data).toEqual(["aaaaaa"]);
+  });
+
+  it("delivers a chunk of many small events that together pass the bound", () => {
+    const parser = new SseParser(1024);
+    const event = `data: ${"x".repeat(100)}\n\n`;
+    const events = parser.push(event.repeat(50)); // ~5 KiB, five times the bound
+    expect(events).toHaveLength(50);
+    expect(events.every((e) => e === "x".repeat(100))).toBe(true);
+  });
+
+  it("delivers a real >1 MiB chunk of feed events with the default bound", () => {
+    const parser = new SseParser();
+    const frame = pubFrame(UPDATE);
+    const count = Math.ceil((1.5 * 1024 * 1024) / frame.length);
+    const events = parser.push(frame.repeat(count));
+    expect(events).toHaveLength(count);
+  });
+
+  it("refuses an unterminated tail that passes the bound, across chunks", () => {
+    const parser = new SseParser(32);
+    parser.push("data: " + "x".repeat(20));
+    expect(() => parser.push("x".repeat(20))).toThrow("SSE event too large");
+  });
+
+  it("counts the current event's fields together with the unterminated line", () => {
+    const parser = new SseParser(32);
+    parser.push("data: " + "a".repeat(20) + "\n"); // kept: 20
+    expect(() => parser.push("data: " + "b".repeat(10))).toThrow("SSE event too large"); // 20 + 16
   });
 
   it("bounds the number of data fields in one event", () => {
@@ -229,6 +288,34 @@ describe("SseParser bound", () => {
   it("resets the count after each event", () => {
     const parser = new SseParser(16);
     for (let i = 0; i < 10; i++) expect(parser.push("data: 1234567\n\n")).toEqual(["1234567"]);
+  });
+
+  it("keeps a healthy connection that sends a >1 MiB chunk of small events", async () => {
+    const api = fakeApi();
+    const stream = sseStream();
+    api.queue("sse", (init) => stream.respond(init));
+    const feed = attachFeed({
+      feedId: FEED_ID,
+      feedToken: FEED_TOKEN,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      initialTokens: CREATED_SSE,
+    });
+    let updates = 0;
+    const errors: string[] = [];
+    feed.on("update", () => (updates += 1));
+    feed.on("error", (e) => errors.push(e.message));
+    feed.start();
+    await flush();
+    const frame = pubFrame(UPDATE);
+    const count = Math.ceil((1.5 * 1024 * 1024) / frame.length);
+    stream.push(CONNECT_FRAME + frame.repeat(count));
+    await flush();
+    expect(errors).toEqual([]);
+    expect(updates).toBe(count);
+    expect(stream.aborted).toBe(false);
+    expect(feed.status).toBe("live");
+    await feed.stop({ deleteFeed: false });
   });
 
   it("is lost (and retried) when the server streams an oversized event", async () => {
