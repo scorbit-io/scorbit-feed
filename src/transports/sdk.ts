@@ -1,0 +1,115 @@
+import {
+  Centrifuge,
+  UnauthorizedError,
+  connectingCodes,
+  subscribingCodes,
+  unsubscribedCodes,
+} from "centrifuge";
+
+import { FeedError, redact } from "../http.js";
+import { asFeedUpdate } from "../message.js";
+import type { Session, Transport, TransportHooks } from "./types.js";
+
+type TokenKind = "connectionToken" | "subscriptionToken";
+
+const TOKEN_ERRORS = new Set(["connectToken", "refreshToken"]);
+
+/**
+ * The sdk transport: the official Centrifugo SDK over a bidirectional WebSocket, with
+ * fossil delta. Tokens are pulled by the SDK through its `getToken` hooks,
+ * which serve whatever the scheduled heartbeat last fetched.
+ *
+ * @param websocket A WebSocket constructor, for runtimes without a global one
+ *   (Node 22+ and browsers have one).
+ */
+export function sdkTransport(websocket?: unknown) {
+  return (hooks: TransportHooks): Transport => {
+    let current: { client: Centrifuge; active: boolean } | null = null;
+    // The token each hook last handed the SDK: asking again means it was rejected or expired.
+    const handedOut: Record<TokenKind, string | undefined> = {
+      connectionToken: undefined,
+      subscriptionToken: undefined,
+    };
+
+    const tokenFor = async (kind: TokenKind): Promise<string> => {
+      const stale = handedOut[kind];
+      let token = hooks.latest()[kind];
+      if (!token || token === stale) {
+        if (!(await hooks.refreshNow())) throw new UnauthorizedError("feed ended");
+        token = hooks.latest()[kind];
+        // Any other error makes the SDK retry, which is right for a failed refresh.
+        if (!token || token === stale) throw new FeedError("token refresh failed");
+      }
+      handedOut[kind] = token;
+      return token;
+    };
+
+    const close = () => {
+      if (!current) return;
+      current.active = false;
+      current.client.disconnect();
+      current = null;
+    };
+
+    const open = (session: Session) => {
+      close();
+      handedOut.connectionToken = session.connectionToken;
+      handedOut.subscriptionToken = session.subscriptionToken;
+      const client = new Centrifuge(session.endpoint, {
+        token: session.connectionToken,
+        getToken: () => tokenFor("connectionToken"),
+        ...(websocket ? { websocket } : {}),
+      });
+      const conn = { client, active: true };
+      current = conn;
+      const drop = (code: number) => {
+        conn.active = false;
+        client.disconnect();
+        current = null;
+        hooks.disconnected(code);
+      };
+
+      client.on("connecting", (ctx) => {
+        if (conn.active && ctx.code !== connectingCodes.connectCalled) hooks.reconnecting();
+      });
+      // `disconnected` means the SDK will not reconnect by itself: the server
+      // sent a no-reconnect code, or getToken said the feed is over.
+      client.on("disconnected", (ctx) => {
+        if (conn.active) drop(ctx.code);
+      });
+      client.on("error", (ctx) => {
+        // Token errors come from our own getToken, and the feed has reported those already.
+        if (!conn.active || TOKEN_ERRORS.has(ctx.type)) return;
+        hooks.error(new FeedError(redact(`centrifugo ${ctx.type} error: ${ctx.error.message}`)));
+      });
+
+      // Fossil delta needs a positioned, recoverable subscription.
+      const sub = client.newSubscription(session.channel, {
+        token: session.subscriptionToken,
+        getToken: () => tokenFor("subscriptionToken"),
+        delta: "fossil",
+        positioned: true,
+        recoverable: true,
+      });
+      sub.on("subscribed", () => {
+        if (conn.active) hooks.live();
+      });
+      sub.on("subscribing", (ctx) => {
+        if (conn.active && ctx.code !== subscribingCodes.subscribeCalled) hooks.reconnecting();
+      });
+      // The SDK resubscribes by itself where it can; `unsubscribed` from the server is final.
+      sub.on("unsubscribed", (ctx) => {
+        if (conn.active && ctx.code !== unsubscribedCodes.unsubscribeCalled) drop(ctx.code);
+      });
+      sub.on("publication", (ctx) => {
+        const update = asFeedUpdate(ctx.data);
+        if (conn.active && update) hooks.update(update);
+      });
+
+      sub.subscribe();
+      client.connect();
+    };
+
+    return { open, refreshed: () => undefined, close };
+  };
+}

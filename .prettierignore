@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+package-lock.json
+CLAUDE.md
+AGENT_CONVENTIONS.md
+SDLC.md
+.sdlc/

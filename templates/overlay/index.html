@@ -1,0 +1,32 @@
+<!doctype html>
+<!--
+  Scorbit feed overlay: a starter for an OBS browser source.
+
+  Run the agent (`scorbit-feed --machines ... --static templates/overlay`) and
+  point OBS at http://127.0.0.1:8787/ -- or open this file directly, with the
+  agent started with --allow-file-origin, and it reads the agent at
+  http://127.0.0.1:8787 (override with ?agent=<url>).
+
+  Everything here is yours to restyle except the attribution slot below.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scorbit feed overlay</title>
+    <link rel="stylesheet" href="overlay.css" />
+  </head>
+  <body>
+    <div id="status" class="status" data-status="connecting" title="connecting"></div>
+    <main id="machines" class="machines"></main>
+
+    <!--
+      ATTRIBUTION SLOT -- required. Scorbit's developer terms require visible
+      attribution wherever feed data is displayed. Keep this element visible.
+      Text for now; the official logo asset is still to come.
+    -->
+    <footer class="attribution" data-scorbit-attribution>Powered by Scorbit</footer>
+
+    <script src="overlay.js"></script>
+  </body>
+</html>
