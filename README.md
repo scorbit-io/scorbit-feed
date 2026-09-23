@@ -295,8 +295,8 @@ Copy the folder and restyle it freely.
 
 Scorbit's [developer terms](https://scorbit.io/developer-terms-of-use/) require
 visible attribution wherever feed data is displayed. The starter overlay's
-attribution slot shows the Scorbit logo (alt text "Powered by Scorbit"); keep it
-visible if you build on it. The logo files and how to use them are in
+attribution slot shows the Scorbit® logo (alt text "Powered by Scorbit"); keep
+it visible if you build on it. The logo files and how to use them are in
 [`assets/brand/`](assets/brand/README.md); the starter overlay ships one of them,
 `scorbit_lockup-horizontal_multi.svg`, whose built-in black strap keeps it
 legible over video.
@@ -317,6 +317,8 @@ data feed itself is governed separately by Scorbit's
 [developer terms](https://scorbit.io/developer-terms-of-use/), which include the
 branding and attribution requirements above.
 
-The Scorbit name and logos, including the files in `assets/brand/` and the logo
-in `templates/overlay/`, are trademarks of Scorbit and are **not** covered by the
-MIT license. Use them only as the developer terms allow.
+The MIT license covers the source code only. SCORBIT® and the Scorbit logo are
+registered trademarks of Spinner Systems, Inc. The logo files, in `assets/brand/`
+and `templates/overlay/`, are © 2026 Spinner Systems, Inc., all rights reserved:
+they are **not** MIT licensed, no trademark rights are granted, and they may be
+used only as the developer terms permit. See [`NOTICE`](NOTICE).

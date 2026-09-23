@@ -29,7 +29,8 @@ All notable changes to this project are documented here. The format follows
 - A starter overlay in `templates/overlay/` whose attribution slot shows the
   Scorbit logo, as the [developer terms](https://scorbit.io/developer-terms-of-use/)
   require.
-- Scorbit logo files in `assets/brand/` (repository only; trademarks, not MIT
-  licensed).
+- Scorbit® logo files in `assets/brand/` (repository only). SCORBIT® and the
+  Scorbit logo are registered trademarks of Spinner Systems, Inc.; the logo
+  files are not MIT licensed. See `NOTICE`, now also shipped in the package.
 - ESM build with type declarations, and an IIFE build of the attach-only browser
   subset (global `ScorbitFeed`).

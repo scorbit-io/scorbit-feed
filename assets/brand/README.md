@@ -1,7 +1,10 @@
 # Scorbit brand marks
 
-These logo files are **Scorbit trademarks**. They are **not** covered by this
-repository's MIT license. You may use them only as Scorbit's
+SCORBIT® and the Scorbit® logo are **registered trademarks of Spinner Systems,
+Inc.** These files are © 2026 Spinner Systems, Inc., all rights reserved. They
+are **not** covered by this repository's MIT license, and no trademark rights
+are granted (see [`LICENSE`](LICENSE) here and [`NOTICE`](../../NOTICE)). You
+may use them only as Scorbit's
 [developer terms](https://scorbit.io/developer-terms-of-use/) allow, for
 example to meet the attribution requirement when you display feed data.
 

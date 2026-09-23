@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 const EXPECTED = [
   "CHANGELOG.md",
   "LICENSE",
+  "NOTICE",
   "README.md",
   "dist/cli.js",
   "dist/cli.js.map",

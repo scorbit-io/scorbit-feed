@@ -29,6 +29,9 @@ only with a one-line reason next to it.
 - **Never let a credential reach a log line, an error message, a URL, or an
   agent response.** The `sb_live_` key is server-side only; the `sbf_` token is
   the only browser-safe credential, and never goes in a URL. Test fixtures use obviously fake values.
+- **Logo files are not MIT licensed.** SCORBIT® and the Scorbit logo are
+  registered trademarks of Spinner Systems, Inc. (see `NOTICE`). Never edit the
+  artwork or remove the notice comment from any `.svg`; a test checks it is there.
 - A test that proves a guard should fail when the guard is removed. Check that
   it does.
 - Keep message and response types in step with the Scorbit API's data-feed
