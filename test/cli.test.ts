@@ -469,3 +469,162 @@ describe("scorbit-feed signals and log hygiene", () => {
     expect(h.lines[0]).toBe("error: Scorbit API answered 403: no???[31mred");
   });
 });
+
+describe("scorbit-feed shutdown races", () => {
+  async function serving(extraArgs: string[] = []) {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, CREATED_SSE));
+    const stream = sseStream();
+    h.api.queue("sse", (init) => stream.respond(init));
+    const handle = (await h.run([...base, "--transport", "sse", ...extraArgs]))!;
+    await flush();
+    return { h, stream, handle };
+  }
+  const held = () => {
+    let release!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => (release = resolve));
+    return { response, release };
+  };
+
+  it("a second signal during the DELETE neither deletes twice nor exits before it settles", async () => {
+    const { h, handle } = await serving();
+    const del = held();
+    h.api.queue("delete", () => del.response);
+    h.signals.emit("SIGINT");
+    await flush();
+    h.signals.emit("SIGINT");
+    h.signals.emit("SIGTERM");
+    await flush();
+    expect(h.exits).toEqual([]);
+    del.release(new Response(null, { status: 204 }));
+    expect(await h.exited).toBe(0);
+    await flush();
+    expect(h.exits).toEqual([0]);
+    expect(h.api.count("delete")).toBe(1);
+    await expect(fetch(`${handle.url}/healthz`)).rejects.toThrow();
+  });
+
+  it("keeps listening for signals, so a second one cannot fall through and kill the process", async () => {
+    const { h } = await serving();
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    h.signals.emit("SIGINT");
+    expect(h.signals.listenerCount("SIGINT")).toBeGreaterThan(0);
+    expect(h.signals.listenerCount("SIGTERM")).toBeGreaterThan(0);
+    await h.exited;
+  });
+
+  it("a signal after the server ended the feed keeps exit code 1, and exits once", async () => {
+    const { h, stream } = await serving();
+    h.api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    stream.push(DISCONNECT_FRAME);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    h.signals.emit("SIGINT");
+    expect(await h.exited).toBe(1);
+    await flush();
+    expect(h.exits).toEqual([1]);
+    expect(h.api.count("delete")).toBe(0);
+    expect(h.lines).not.toContain("stopping; deleting the feed this agent created");
+  });
+
+  it("a signal during a feed-ended cleanup keeps its code, and the DELETE is awaited", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, CREATED_SSE));
+    const del = held();
+    h.api.queue("delete", () => del.response);
+    // The transport cannot be opened, so the feed ends locally: cleanup must delete it.
+    const { Feed } = await import("../src/feed.js");
+    const target = Feed.prototype as unknown as { createTransport: () => unknown };
+    const spy = vi.spyOn(target, "createTransport").mockImplementationOnce(() => {
+      throw new Error("no transport");
+    });
+    await h.run([...base, "--transport", "sse"]);
+    await flush();
+    h.signals.emit("SIGINT");
+    await flush();
+    expect(h.exits).toEqual([]);
+    del.release(new Response(null, { status: 204 }));
+    expect(await h.exited).toBe(1);
+    await flush();
+    expect(h.exits).toEqual([1]);
+    expect(h.api.count("delete")).toBe(1);
+    spy.mockRestore();
+  });
+
+  it("a signal during create, then a second one, deletes once and exits once", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    const create = held();
+    h.api.queue("create", () => create.response);
+    const del = held();
+    h.api.queue("delete", () => del.response);
+    const running = h.run([...base, "--transport", "sse"]);
+    await flush();
+    h.signals.emit("SIGINT");
+    h.signals.emit("SIGINT");
+    create.release(json(201, CREATED_SSE));
+    await flush();
+    h.signals.emit("SIGTERM");
+    expect(h.exits).toEqual([]);
+    del.release(new Response(null, { status: 204 }));
+    expect(await running).toBeUndefined();
+    expect(h.exits).toEqual([0]);
+    expect(h.api.count("delete")).toBe(1);
+  });
+
+  it("a signal while the port is found taken exits 1 once, after the DELETE", async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const port = String((blocker.address() as { port: number }).port);
+    try {
+      const h = harness({ SCORBIT_API_KEY: API_KEY });
+      h.api.queue("create", json(201, CREATED_SSE));
+      const del = held();
+      h.api.queue("delete", () => del.response);
+      const running = h.run(["--base-url", BASE_URL, "--port", port, "--transport", "sse"]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      h.signals.emit("SIGINT");
+      expect(h.exits).toEqual([]);
+      del.release(new Response(null, { status: 204 }));
+      await running;
+      expect(h.exits).toEqual([1]);
+      expect(h.api.count("delete")).toBe(1);
+    } finally {
+      blocker.close();
+    }
+  });
+
+  it("the handle's shutdown and a signal together finish once", async () => {
+    const { h, handle } = await serving();
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    const first = handle.shutdown();
+    h.signals.emit("SIGTERM");
+    await first;
+    await handle.shutdown();
+    expect(h.exits).toEqual([0]);
+    expect(h.api.count("delete")).toBe(1);
+  });
+});
+
+describe("scorbit-feed exits last", () => {
+  it("exits only after the server has closed", async () => {
+    const order: string[] = [];
+    let done!: () => void;
+    const exited = new Promise<void>((resolve) => (done = resolve));
+    const h = harness(
+      { SCORBIT_API_KEY: API_KEY },
+      {
+        exit: (code) => {
+          order.push(`exit ${code}`);
+          done();
+        },
+      },
+    );
+    h.api.queue("create", json(201, CREATED_SSE));
+    h.api.queue("sse", (init) => sseStream().respond(init));
+    h.api.queue("delete", new Response(null, { status: 204 }));
+    const handle = (await h.run([...base, "--transport", "sse"]))!;
+    handle.server.server.on("close", () => order.push("server closed"));
+    h.signals.emit("SIGINT");
+    await exited;
+    expect(order).toEqual(["server closed", "exit 0"]);
+  });
+});

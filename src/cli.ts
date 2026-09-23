@@ -44,7 +44,7 @@ Tokens are refreshed on the interval the server sets for each feed, and the
 feed stays alive for as long as the agent stays subscribed.`;
 
 export interface SignalSource {
-  once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  on(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
 }
 
 export interface CliDeps {
@@ -142,22 +142,52 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     return undefined;
   }
 
-  // Registered before anything is created, so a signal during the create still
-  // leads to the feed being deleted: the handler only records it until the
-  // agent can act, and each step below checks.
-  let stopRequested = false;
-  const running: { shutdown?: () => Promise<void> } = {};
-  const onSignal = () => {
-    stopRequested = true;
-    if (running.shutdown) void running.shutdown();
-  };
-  deps.signals.once("SIGINT", onSignal);
-  deps.signals.once("SIGTERM", onSignal);
-
   const apiKey = deps.env.SCORBIT_API_KEY;
   const feedToken = deps.env.SCORBIT_FEED_TOKEN;
-  let feed!: Feed;
+  let feed: Feed | undefined;
   let created = false;
+  // The server once it is listening: only then does finish() close it.
+  const up: { server?: AgentServer } = {};
+
+  // Every exit goes through finish(): once only, whoever calls first decides
+  // the exit code, and it exits only after the feed is stopped (and deleted,
+  // if this agent created it) and the server is closed.
+  let cleaned: Promise<void> | undefined;
+  const cleanup = (): Promise<void> =>
+    (cleaned ??=
+      feed?.stop({ deleteFeed: created }).catch((err: unknown) => {
+        log(`could not delete feed: ${messageOf(err)}`);
+      }) ?? Promise.resolve());
+  let finishing: Promise<void> | undefined;
+  let finishStarted = false;
+  const finish = (code: number, line: string): Promise<void> => {
+    // Set before the body runs: stopping the feed emits `ended` synchronously,
+    // and that re-entrant call must not start a second finish.
+    if (finishStarted) return finishing ?? Promise.resolve();
+    finishStarted = true;
+    finishing = (async () => {
+      log(line);
+      await cleanup();
+      await up.server?.close();
+      deps.exit(code);
+    })();
+    return finishing;
+  };
+  const stopLine = () => (created ? "stopping; deleting the feed this agent created" : "stopping");
+
+  // Registered before anything is created, and kept for the agent's lifetime:
+  // a signal during the create is recorded and acted on once the feed exists,
+  // and a second signal cannot fall through to the default handler and kill
+  // the process before the feed is deleted.
+  let ready = false;
+  let stopRequested = false;
+  const onSignal = () => {
+    stopRequested = true;
+    if (ready) void finish(0, stopLine());
+  };
+  deps.signals.on("SIGINT", onSignal);
+  deps.signals.on("SIGTERM", onSignal);
+
   try {
     if (options["feed-id"] !== undefined) {
       if (!feedToken) throw new UsageError("--feed-id needs SCORBIT_FEED_TOKEN in the environment");
@@ -190,23 +220,17 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
       log(`created feed ${clean(feed.feedId)} (${opened.created.transport}) over ${clean(names)}`);
     }
   } catch (err) {
-    // `created` is set only once `feed` exists.
-    if (created) await feed.stop().catch(() => undefined);
-    log(`error: ${messageOf(err)}`);
-    deps.exit(err instanceof UsageError ? 2 : 1);
+    await finish(err instanceof UsageError ? 2 : 1, `error: ${messageOf(err)}`);
     return undefined;
   }
   if (stopRequested) {
     // A signal arrived while the feed was being created.
-    log("stopping; deleting the feed this agent created");
-    await feed.stop({ deleteFeed: created }).catch((err: unknown) => {
-      log(`could not delete feed: ${messageOf(err)}`);
-    });
-    deps.exit(0);
+    await finish(0, stopLine());
     return undefined;
   }
 
-  const server = new AgentServer({
+  const agentFeed = feed;
+  const agentServer = new AgentServer({
     host: options.host,
     port: options.port,
     staticDir: root,
@@ -214,57 +238,30 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     allowFileOrigin: options["allow-file-origin"],
   });
 
-  // Every exit route runs this: it deletes a feed this agent created, once,
-  // even when the feed already ended locally (feed.stop() is idempotent).
-  let cleaned: Promise<void> | undefined;
-  const cleanup = (): Promise<void> =>
-    (cleaned ??= feed.stop({ deleteFeed: created }).catch((err: unknown) => {
-      log(`could not delete feed: ${messageOf(err)}`);
-    }));
-
-  // Set before feed.stop(), whose `ended` event fires synchronously.
-  let stopping = false;
-  let stopped: Promise<void> | undefined;
-  const shutdownNow = (): Promise<void> => {
-    stopping = true;
-    stopped ??= (async () => {
-      log(created ? "stopping; deleting the feed this agent created" : "stopping");
-      await cleanup();
-      await server.close();
-      deps.exit(0);
-    })();
-    return stopped;
-  };
-
-  feed.on("update", (update) => server.publishUpdate(update));
-  feed.on("status", (status) => {
-    server.publishStatus(status);
+  agentFeed.on("update", (update) => agentServer.publishUpdate(update));
+  agentFeed.on("status", (status) => {
+    agentServer.publishStatus(status);
     log(`feed ${status}`);
   });
-  feed.on("machines", ({ added, removed }) => {
+  agentFeed.on("machines", ({ added, removed }) => {
     if (added.length) log(`machines joined: ${clean(added.join(", "))}`);
     if (removed.length) log(`machines left: ${clean(removed.join(", "))}`);
   });
-  feed.on("error", (err) => log(`warning: ${messageOf(err)}`));
-  feed.on("ended", ({ reason }) => {
-    if (stopping) return;
-    stopping = true;
-    log(`feed ended: ${reason}`);
-    void cleanup()
-      .then(() => server.close())
-      .then(() => deps.exit(1));
-  });
+  agentFeed.on("error", (err) => log(`warning: ${messageOf(err)}`));
+  // Also fires, synchronously, when finish() stops the feed: finish is once-only.
+  agentFeed.on("ended", ({ reason }) => void finish(1, `feed ended: ${reason}`));
 
   let address;
   try {
-    address = await server.listen();
+    address = await agentServer.listen();
   } catch (err) {
-    log(`error: cannot listen on ${clean(options.host)}:${options.port}: ${messageOf(err)}`);
-    stopping = true;
-    await cleanup();
-    deps.exit(1);
+    await finish(
+      1,
+      `error: cannot listen on ${clean(options.host)}:${options.port}: ${messageOf(err)}`,
+    );
     return undefined;
   }
+  up.server = agentServer;
   const url = `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
   if (!isLoopbackHost(options.host)) {
     log(
@@ -273,12 +270,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   }
   log(`serving on ${url} (GET /state, /events, /healthz${root ? ", and static files" : ""})`);
 
-  running.shutdown = shutdownNow;
+  ready = true;
   if (stopRequested) {
     // A signal arrived while the server was starting.
-    await shutdownNow();
+    await finish(0, stopLine());
     return undefined;
   }
-  feed.start();
-  return { feed, server, url, shutdown: shutdownNow };
+  agentFeed.start();
+  return { feed: agentFeed, server: agentServer, url, shutdown: () => finish(0, stopLine()) };
 }
