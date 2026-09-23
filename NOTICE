@@ -12,11 +12,11 @@ The Scorbit name and logos are not licensed under the MIT License. This
 includes every file in assets/brand/ and the logo in templates/overlay/
 (templates/overlay/*.svg), which is part of the published npm package.
 
-SCORBIT® (U.S. Reg. No. 6,705,332) and the Scorbit logo are registered
-trademarks of Spinner Systems, Inc. The Scorbit logo files, including those in
-assets/brand/ and templates/overlay/, are © 2026 Spinner Systems, Inc. All
-rights reserved. They are not licensed under the MIT license, and no trademark
-rights are granted; permitted use is governed by
+SCORBIT® (U.S. Reg. No. 6,705,332) and the Scorbit logo (U.S. Reg. No.
+8,291,996) are registered trademarks of Spinner Systems, Inc. The Scorbit logo
+files, including those in assets/brand/ and templates/overlay/, are © 2026
+Spinner Systems, Inc. All rights reserved. They are not licensed under the MIT
+license, and no trademark rights are granted; permitted use is governed by
 https://scorbit.io/developer-terms-of-use/.
 
 Nothing in this repository or package grants any right or license to use the

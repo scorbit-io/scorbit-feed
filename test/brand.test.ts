@@ -29,19 +29,22 @@ describe("brand notices", () => {
     expect(notice).toBe(NOTICE);
   });
 
-  it.each(["LICENSE", "NOTICE", "assets/brand/LICENSE"])(
-    "%s states the owner, the registered trademarks, not MIT, and the terms",
-    (path) => {
-      const text = read(path).replace(/\s+/g, " ");
-      expect(text).toContain("© 2026 Spinner Systems, Inc. All rights reserved.");
-      expect(text).toMatch(
-        /SCORBIT® (\(U\.S\. Reg\. No\. 6,705,332\) )?and the Scorbit logo are registered trademarks of Spinner Systems, Inc\./,
-      );
-      expect(text).toMatch(/not licensed under the MIT license/i);
-      expect(text).toContain("no trademark rights are granted");
-      expect(text).toContain("https://scorbit.io/developer-terms-of-use/");
-    },
-  );
+  it.each([
+    ["LICENSE", true],
+    ["NOTICE", true],
+    ["assets/brand/LICENSE", false],
+  ])("%s states the owner, the registered trademarks, not MIT, and the terms", (path, numbered) => {
+    const text = read(path).replace(/\s+/g, " ");
+    const statement = numbered
+      ? "SCORBIT® (U.S. Reg. No. 6,705,332) and the Scorbit logo (U.S. Reg. No. 8,291,996) are registered trademarks of Spinner Systems, Inc."
+      : /SCORBIT® (\(U\.S\. Reg\. No\. 6,705,332\) )?and the Scorbit logo (\(U\.S\. Reg\. No\. 8,291,996\) )?are registered trademarks of Spinner Systems, Inc\./;
+    if (typeof statement === "string") expect(text).toContain(statement);
+    else expect(text).toMatch(statement);
+    expect(text).toContain("© 2026 Spinner Systems, Inc. All rights reserved.");
+    expect(text).toMatch(/not licensed under the MIT license/i);
+    expect(text).toContain("no trademark rights are granted");
+    expect(text).toContain("https://scorbit.io/developer-terms-of-use/");
+  });
 
   it("keeps the MIT text in LICENSE unchanged below the scope note", () => {
     const license = read("LICENSE");
