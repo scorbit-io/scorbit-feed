@@ -285,6 +285,10 @@ opened any other way it reads the agent at `http://127.0.0.1:8787`, or at
 - **From your own web server:** allow that server's origin with
   `--cors-origin <origin>`.
 
+Its connection indicator is a small dot that changes shape as well as colour (a
+ring while connecting, filled when live, a dash once ended), and its state is
+announced to screen readers through a polite live region.
+
 Copy the folder and restyle it freely.
 
 ## Branding and attribution

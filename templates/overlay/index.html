@@ -22,7 +22,15 @@
     <link rel="stylesheet" href="overlay.css" />
   </head>
   <body>
-    <div id="status" class="status" data-status="connecting" title="connecting"></div>
+    <!--
+      Connection status: a small dot whose colour AND shape change (filled when
+      live, a ring while connecting, a dash once ended), plus text that screen
+      readers announce. The text is visually hidden to keep the overlay clean.
+    -->
+    <div id="status" class="status" data-status="connecting" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="status-text" class="visually-hidden">Connecting to the live feed</span>
+    </div>
     <main id="machines" class="machines"></main>
 
     <!--

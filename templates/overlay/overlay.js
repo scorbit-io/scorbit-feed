@@ -50,11 +50,24 @@
   }
 
   var statusEl = document.getElementById("status");
+  var statusText = document.getElementById("status-text");
+  // What the live region announces; the dot's colour and shape match these.
+  var STATUS_LABELS = {
+    idle: "Connecting to the live feed",
+    connecting: "Connecting to the live feed",
+    live: "Live",
+    reconnecting: "Reconnecting to the live feed",
+    ended: "Live feed ended",
+  };
   var machinesEl = document.getElementById("machines");
 
   function setStatus(status) {
+    var known = Object.prototype.hasOwnProperty.call(STATUS_LABELS, status);
+    var label = known ? STATUS_LABELS[status] : "Live feed status: " + String(status);
     statusEl.dataset.status = status;
-    statusEl.title = status;
+    statusEl.title = label;
+    // Only a real change is announced, so a repeated status is not read twice.
+    if (statusText.textContent !== label) statusText.textContent = label;
   }
 
   function playerName(score) {
