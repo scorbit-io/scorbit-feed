@@ -1,4 +1,4 @@
-import { open, realpath, stat } from "node:fs/promises";
+import { type FileHandle, open, realpath, stat } from "node:fs/promises";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -74,6 +74,11 @@ export function isLoopbackHost(host: string): boolean {
 function hostnameOf(header: string): string {
   const match = /^(\[[^\]]*\]|[^:]*)(:\d+)?$/.exec(header);
   return (match?.[1] ?? "").toLowerCase();
+}
+
+/** Close a file handle, if any, ignoring a failure to close. */
+async function closeQuietly(file: FileHandle | undefined): Promise<void> {
+  await file?.close().catch(() => undefined);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -240,7 +245,9 @@ export class AgentServer {
 
     let target = path.resolve(root, `.${path.sep}${relative}`);
     if (!inside(target)) return sendJson(res, 403, { error: "forbidden" });
-    let file;
+    // The handle is closed on every path: here until a read stream takes it
+    // over, and by that stream (autoClose) on end, error or a client abort.
+    let file: FileHandle | undefined;
     try {
       if ((await stat(target)).isDirectory()) target = path.join(target, "index.html");
       target = await realpath(target);
@@ -249,17 +256,20 @@ export class AgentServer {
       // Opened before any header is sent, so an unreadable file is still a clean 404.
       file = await open(target, "r");
       if (!(await file.stat()).isFile()) {
-        await file.close();
+        await closeQuietly(file);
         return sendJson(res, 404, { error: "not found" });
       }
     } catch {
+      await closeQuietly(file);
       return sendJson(res, 404, { error: "not found" });
     }
+    const stream = file.createReadStream({ autoClose: true });
     res.writeHead(200, {
       "Content-Type": CONTENT_TYPES[path.extname(target).toLowerCase()],
       "Cache-Control": "no-cache",
     });
-    // pipeline closes the file and destroys the response on a read error.
-    await pipeline(file.createReadStream(), res).catch(() => undefined);
+    // pipeline destroys both sides on a read error or a client abort, and
+    // destroying the stream closes the handle.
+    await pipeline(stream, res).catch(() => undefined);
   }
 }
