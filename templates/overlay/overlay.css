@@ -1,0 +1,119 @@
+:root {
+  --card-bg: rgba(12, 10, 21, 0.72);
+  --text: #ffffff;
+  --muted: rgba(255, 255, 255, 0.6);
+  --accent: #00ff88;
+  --warn: #ffff3e;
+  --ended: rgba(255, 255, 255, 0.25);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+/* Status is told by shape as well as colour: a ring while connecting or
+   reconnecting, a filled dot when live, a dash once ended. */
+.status {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+}
+.status-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--warn);
+  border-radius: 50%;
+  background: transparent;
+}
+.status[data-status="live"] .status-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.status[data-status="ended"] .status-dot {
+  height: 0;
+  margin-top: 5px;
+  border-width: 1px 0;
+  border-color: var(--ended);
+  border-radius: 0;
+  width: 12px;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.machines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 16px;
+}
+
+.machine {
+  flex: 1 1 18rem;
+  min-width: 18rem;
+  border-radius: 12px;
+  background: var(--card-bg);
+  padding: 12px 16px;
+}
+
+.machine h2 {
+  margin: 0 0 8px;
+  font-size: 1.3rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.machine .state {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+}
+
+.machine ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.machine li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.attribution {
+  position: fixed;
+  right: 12px;
+  bottom: 8px;
+  line-height: 0;
+}
+
+/* The brand guidelines' digital minimum for the horizontal lockup is 30px tall. */
+.attribution img {
+  display: block;
+  height: 30px;
+  width: auto;
+}

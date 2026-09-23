@@ -1,0 +1,77 @@
+{
+  "name": "@scorbit/feed",
+  "version": "0.1.0",
+  "description": "Client library and local agent for the Scorbit real-time data feed.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scorbit-io/scorbit-feed.git"
+  },
+  "homepage": "https://github.com/scorbit-io/scorbit-feed#readme",
+  "bugs": "https://github.com/scorbit-io/scorbit-feed/issues",
+  "keywords": [
+    "scorbit",
+    "pinball",
+    "centrifugo",
+    "overlay",
+    "obs",
+    "live-scores"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/scorbit-feed.iife.js",
+  "jsdelivr": "./dist/scorbit-feed.iife.js",
+  "bin": {
+    "scorbit-feed": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "templates/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "check": "npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run pack:check",
+    "prepublishOnly": "npm run check",
+    "pack:check": "node scripts/check-pack.mjs"
+  },
+  "dependencies": {
+    "centrifuge": "^5.7.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "tsup": "^8.5.1",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^4.1.11"
+  }
+}
