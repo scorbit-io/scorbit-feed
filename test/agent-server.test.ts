@@ -185,6 +185,24 @@ describe("AgentServer routes", () => {
     await next.reader.cancel();
   });
 
+  it("streams a machine-set change as a `machines` event, before the state that carries it", async () => {
+    const { server, base } = await start();
+    const response = await fetch(`${base}/events`);
+    (await readEvents(response, 2)).reader.releaseLock();
+    const change = { added: [], removed: [UPDATE.payload.machines[0]!.machine_uuid], machines: [] };
+    server.publishMachines(change);
+    server.publishUpdate({ ...UPDATE, payload: { machines: [] } });
+    const next = await readEvents(response, 2);
+    expect(next.events).toEqual([
+      { event: "machines", data: change },
+      {
+        event: "state",
+        data: { status: "idle", updated_at: UPDATE.metadata.updated_at, machines: [] },
+      },
+    ]);
+    await next.reader.cancel();
+  });
+
   it("forgets an events client that disconnects, and ends the rest on close", async () => {
     const { server, base } = await start();
     const gone = await fetch(`${base}/events`);

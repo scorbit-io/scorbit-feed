@@ -64,27 +64,19 @@ describe("tokensProblem (heartbeat bodies)", () => {
     ],
     ["a numeric sse_endpoint", { ...heartbeatSse(1), sse_endpoint: 5 }, "sse_endpoint"],
     ["a ws sse_endpoint", { ...heartbeatSse(1), sse_endpoint: "wss://c.test/sse" }, "sse_endpoint"],
-    // An endpoint for the other transport, explicit or inferred.
+    // An endpoint for the other transport.
     [
-      "sdk (explicit) with an sse_endpoint",
-      { ...heartbeatSdk(1), transport: "sdk", sse_endpoint: SSE_ENDPOINT },
-      "sse_endpoint",
-    ],
-    [
-      "sdk (inferred) with an sse_endpoint",
+      "sdk with an sse_endpoint",
       { ...heartbeatSdk(1), sse_endpoint: SSE_ENDPOINT },
       "sse_endpoint",
     ],
-    [
-      "sse (explicit) with a ws_endpoint",
-      { ...heartbeatSse(1), transport: "sse", ws_endpoint: WS_ENDPOINT },
-      "ws_endpoint",
-    ],
-    [
-      "sse (inferred) with a ws_endpoint",
-      { ...heartbeatSse(1), ws_endpoint: WS_ENDPOINT },
-      "ws_endpoint",
-    ],
+    ["sse with a ws_endpoint", { ...heartbeatSse(1), ws_endpoint: WS_ENDPOINT }, "ws_endpoint"],
+    // Every heartbeat names its stream: nothing is carried over from create.
+    ["no channel", { ...heartbeatSdk(1), channel: undefined }, "channel"],
+    ["another feed's channel", { ...heartbeatSdk(1), channel: "data_feed:f_other" }, "channel"],
+    ["no transport", { ...heartbeatSdk(1), transport: undefined }, "transport"],
+    ["sdk without ws_endpoint", { ...heartbeatSdk(1), ws_endpoint: undefined }, "ws_endpoint"],
+    ["sse without sse_endpoint", { ...heartbeatSse(1), sse_endpoint: undefined }, "sse_endpoint"],
   ])("rejects %s", (_label, body, field) => {
     expect(tokensProblem(body)).toBe(field);
   });
@@ -92,8 +84,7 @@ describe("tokensProblem (heartbeat bodies)", () => {
   it.each([
     ["sse", heartbeatSse(1)],
     ["sdk", heartbeatSdk(1)],
-    ["sdk with endpoint", { ...heartbeatSdk(1), transport: "sdk", ws_endpoint: "wss://c.test/ws" }],
-    ["sse with endpoint", { ...heartbeatSse(1), transport: "sse", sse_endpoint: SSE_ENDPOINT }],
+    ["another wss endpoint", { ...heartbeatSdk(1), ws_endpoint: "wss://c.test/ws" }],
     ["loopback endpoint", { ...heartbeatSdk(1), ws_endpoint: "ws://localhost:8000/ws" }],
   ])("accepts %s", (_label, body) => {
     expect(tokensProblem(body)).toBeUndefined();
@@ -131,13 +122,13 @@ describe("createdProblem (create bodies)", () => {
     [
       "sdk with only an sse_endpoint",
       { ...CREATED_SDK, ws_endpoint: undefined, sse_endpoint: SSE_ENDPOINT },
-      "sse_endpoint",
+      "ws_endpoint",
     ],
     ["sdk with both endpoints", { ...CREATED_SDK, sse_endpoint: SSE_ENDPOINT }, "sse_endpoint"],
     [
       "sse with only a ws_endpoint",
       { ...CREATED_SSE, sse_endpoint: undefined, ws_endpoint: WS_ENDPOINT },
-      "ws_endpoint",
+      "sse_endpoint",
     ],
   ])("rejects %s", (_label, body, field) => {
     expect(createdProblem(body)).toBe(field);
@@ -223,7 +214,11 @@ describe("heartbeat validation in the feed", () => {
     });
     const errors: string[] = [];
     feed.on("error", (e) => errors.push(e.message));
-    api.queue("heartbeat", json(200, heartbeatSse(2)), json(200, heartbeatSdk(3)));
+    api.queue(
+      "heartbeat",
+      json(200, { ...heartbeatSdk(2), subscription_token: undefined }),
+      json(200, heartbeatSdk(3)),
+    );
     feed.start();
     await vi.advanceTimersByTimeAsync(CREATED_SDK.heartbeat_interval * 1000);
     expect(errors).toContain("malformed heartbeat response: bad subscription_token");
@@ -257,7 +252,7 @@ describe("heartbeat validation in the feed", () => {
 
   it("never reuses the last endpoint for a different transport", async () => {
     const api = fakeApi();
-    api.queue("heartbeat", json(200, { ...heartbeatSse(2), transport: "sse" }));
+    api.queue("heartbeat", json(200, { ...heartbeatSse(2), sse_endpoint: undefined }));
     const feed = attachFeed({
       feedId: FEED_ID,
       feedToken: FEED_TOKEN,
@@ -272,17 +267,26 @@ describe("heartbeat validation in the feed", () => {
     feed.on("ended", ({ reason }) => ended.push(reason));
     feed.start();
     await vi.advanceTimersByTimeAsync(CREATED_SDK.heartbeat_interval * 1000);
-    // The ws endpoint from create is never handed to fetch.
+    // The ws endpoint from create is never handed to fetch: the reply is malformed, and retried.
     expect(api.count("sse")).toBe(0);
-    expect(errors[0]).toMatch(/No Centrifugo endpoint/);
-    expect(ended).toEqual(["stopped"]);
+    expect(errors).toEqual(["malformed heartbeat response: bad sse_endpoint"]);
+    expect(ended).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+    await feed.stop({ deleteFeed: false });
   });
 
   it("retries, without applying, a heartbeat addressed to another feed", async () => {
     const api = fakeApi();
     const stream = sseStream();
     api.queue("sse", (init) => stream.respond(init));
-    api.queue("heartbeat", json(200, { ...heartbeatSse(2), feed_id: "f_someone_else" }));
+    api.queue(
+      "heartbeat",
+      json(200, {
+        ...heartbeatSse(2),
+        feed_id: "f_someone_else",
+        channel: "data_feed:f_someone_else",
+      }),
+    );
     const feed = attachFeed({
       feedId: FEED_ID,
       feedToken: FEED_TOKEN,
@@ -309,7 +313,6 @@ describe("heartbeat validation in the feed", () => {
       feedToken: FEED_TOKEN,
       baseUrl: BASE_URL,
       fetch: api.fetch,
-      endpoint: SSE_ENDPOINT,
       initialTokens: { ...CREATED_SSE, feed_id: "f_someone_else" },
     });
     // Nothing from the other feed's reply is taken, not even its machines.
@@ -325,6 +328,7 @@ describe("heartbeat validation in the feed", () => {
   it("never takes an endpoint from tokens in hand that belong to another feed", async () => {
     const api = fakeApi();
     api.queue("heartbeat", json(200, heartbeatSse(2)));
+    api.queue("sse", (init) => sseStream().respond(init));
     const feed = attachFeed({
       feedId: FEED_ID,
       feedToken: FEED_TOKEN,
@@ -340,9 +344,13 @@ describe("heartbeat validation in the feed", () => {
     feed.on("ended", ({ reason }) => ended.push(reason));
     feed.start();
     await flush();
-    // With no trusted endpoint anywhere, the feed ends locally rather than connect there.
-    expect(api.count("sse")).toBe(0);
-    expect(ended).toEqual(["stopped"]);
+    // The first heartbeat supplies the endpoint; the untrusted one is never used.
+    expect(api.calls.map((c) => [c.key, c.url])).toEqual([
+      ["heartbeat", `${BASE_URL}/api/v2/data-feeds/${FEED_ID}/heartbeat/`],
+      ["sse", SSE_ENDPOINT],
+    ]);
+    expect(ended).toEqual([]);
+    await feed.stop({ deleteFeed: false });
   });
 
   it("keeps its own copy of the tokens in hand: changing the caller's object has no effect", async () => {
@@ -383,7 +391,6 @@ describe("heartbeat validation in the feed", () => {
       feedToken: FEED_TOKEN,
       baseUrl: BASE_URL,
       fetch: api.fetch,
-      endpoint: SSE_ENDPOINT,
       initialTokens: {
         ...CREATED_SSE,
         feed_id: "f_someone_else",
@@ -441,7 +448,6 @@ describe("heartbeat validation in the feed", () => {
       feedToken: FEED_TOKEN,
       baseUrl: BASE_URL,
       fetch: api.fetch,
-      endpoint: SSE_ENDPOINT,
       initialTokens: { ...CREATED_SSE, token_ttl: 0 },
     });
     feed.start();

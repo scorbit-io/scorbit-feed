@@ -10,10 +10,10 @@ import {
   API_KEY,
   BASE_URL,
   CREATED_SSE,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   MACHINE_A,
-  SSE_ENDPOINT,
   heartbeatSse,
   jwt,
   withEndpoint,
@@ -50,10 +50,13 @@ function queueStream(api: ReturnType<typeof fakeApi>) {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // No jitter: each wait is the top of its range (jitter has its own tests).
+  vi.spyOn(Math, "random").mockReturnValue(0);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -184,7 +187,7 @@ describe("feed error listeners and stability", () => {
     stream.push(CONNECT_FRAME);
     await vi.advanceTimersByTimeAsync(10_000);
     stream.push(`data: ${JSON.stringify({ push: { disconnect: { code: 3005 } } })}\n\n`);
-    await flush();
+    await vi.advanceTimersByTimeAsync(0);
     // Thirty seconds live in total: refreshed at once, no backoff.
     expect(api.count("heartbeat")).toBe(1);
   });
@@ -232,11 +235,15 @@ describe("review fixes", () => {
   });
 
   it("still deletes on stop() after the feed ended locally, and retries a failed delete", async () => {
-    // No endpoint known anywhere: the feed ends locally after its first heartbeat.
-    const { api, feed, ended } = setup({ initialTokens: undefined });
-    api.queue("heartbeat", json(200, heartbeatSse(2)));
+    // A connection that cannot even be attempted ends the feed locally.
+    const target = Feed.prototype as unknown as { createTransport: () => never };
+    vi.spyOn(target, "createTransport").mockImplementationOnce(() => {
+      throw new Error("no transport here");
+    });
+    const { api, feed, ended, errors } = setup();
     feed.start();
     await flush();
+    expect(errors.map((e) => e.message)).toEqual(["no transport here"]);
     expect(ended).toEqual(["stopped"]);
     api.queue("delete", json(500), new Response(null, { status: 204 }));
     await expect(feed.stop()).rejects.toMatchObject({ status: 500 });
@@ -248,7 +255,7 @@ describe("review fixes", () => {
   it("does not try to delete a feed the server already ended", async () => {
     const { api, feed, ended } = setup();
     queueStream(api);
-    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    api.queue("heartbeat", json(404, ERRORS.notFound));
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
     expect(ended).toEqual(["ended"]);
@@ -261,7 +268,7 @@ describe("Retry-After", () => {
   it("waits at least as long as a 429 asks", async () => {
     const { api, feed, errors } = setup();
     queueStream(api);
-    const throttled = json(429, { detail: "Request was throttled." });
+    const throttled = json(429, ERRORS.throttled);
     throttled.headers.set("Retry-After", "10");
     api.queue("heartbeat", throttled, json(200, heartbeatSse(2)));
     queueStream(api);
@@ -316,24 +323,6 @@ describe("URL checks", () => {
     },
   );
 
-  it.each([
-    "ftp://centrifugo.test/",
-    "ws://centrifugo.example/connection/websocket",
-    "http://centrifugo.example/connection/uni_sse",
-    "not a url",
-  ])("refuses endpoint %j up front", (endpoint) => {
-    expect(() => attachFeed({ feedId: FEED_ID, feedToken: FEED_TOKEN, endpoint })).toThrow(
-      /endpoint/,
-    );
-  });
-
-  it.each(["ws://localhost:8000/connection/websocket", "wss://c.test/x", SSE_ENDPOINT])(
-    "accepts endpoint %j",
-    (endpoint) => {
-      expect(attachFeed({ feedId: FEED_ID, feedToken: FEED_TOKEN, endpoint })).toBeInstanceOf(Feed);
-    },
-  );
-
   it("treats a heartbeat with a bad endpoint as a failed refresh, never connecting to it", async () => {
     const { api, feed, errors, ended } = setup();
     queueStream(api);
@@ -352,7 +341,7 @@ describe("URL checks", () => {
   it("never lets a refresh reject: an unexpected failure becomes an error event", async () => {
     const target = Feed.prototype as unknown as { heartbeat: () => Promise<boolean> };
     const spy = vi.spyOn(target, "heartbeat").mockRejectedValueOnce(new Error("unexpected"));
-    const { api, feed, errors } = setup({ initialTokens: undefined, endpoint: SSE_ENDPOINT });
+    const { api, feed, errors } = setup({ initialTokens: undefined });
     feed.start();
     await flush();
     expect(errors.map((e) => e.message)).toEqual(["unexpected"]);

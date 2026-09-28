@@ -42,12 +42,44 @@ describe("request", () => {
   });
 
   it.each([
-    [{ detail: "Feed not found." }, "Feed not found."],
-    [["You may have at most 2 live data feeds."], "You may have at most 2 live data feeds."],
-    [{ machines: ["bad"] }, undefined],
-    [{ detail: 3 }, undefined],
-    [[1], undefined],
-  ])("reads the DRF error body %j", async (body, detail) => {
+    [
+      {
+        message: "Feed not found.",
+        type: "client_error",
+        errors: [{ code: "not_found", detail: "Feed not found.", attr: null }],
+      },
+      "Feed not found.",
+      "not_found",
+    ],
+    [
+      {
+        message: "a",
+        type: "validation_error",
+        errors: [
+          { code: "invalid", detail: "a", attr: "machines.0" },
+          { code: "invalid", detail: "b", attr: "machines.1" },
+        ],
+      },
+      "a b",
+      "invalid",
+    ],
+    // No usable detail in the errors: the message stands in.
+    [
+      { message: "Throttled.", type: "client_error", errors: [{ code: "throttled" }] },
+      "Throttled.",
+      "throttled",
+    ],
+    [{ message: 7, type: "client_error", errors: [null] }, undefined, undefined],
+    [{ detail: "Feed not found." }, "Feed not found.", undefined],
+    [
+      ["You may have at most 2 live data feeds."],
+      "You may have at most 2 live data feeds.",
+      undefined,
+    ],
+    [{ machines: ["bad"] }, undefined, undefined],
+    [{ detail: 3 }, undefined, undefined],
+    [[1], undefined, undefined],
+  ])("reads the error body %j", async (body, detail, code) => {
     const api = fakeApi();
     api.queue("create", json(400, body));
     const error = await request<never>(api.fetch, "https://x.test/", "POST", API_KEY, {}).catch(
@@ -56,6 +88,7 @@ describe("request", () => {
     expect(error).toBeInstanceOf(FeedHttpError);
     expect(error.status).toBe(400);
     expect(error.detail).toBe(detail);
+    expect(error.code).toBe(code);
     expect(error.message).toBe(
       detail ? `Scorbit API answered 400: ${detail}` : "Scorbit API answered 400",
     );

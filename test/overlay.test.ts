@@ -187,3 +187,113 @@ describe("overlay connection status", () => {
     expect(text.textContent).toBe("Live feed status: constructor");
   });
 });
+
+/** Just enough DOM for the overlay's tiles: parents, children, moves and removal. */
+class FakeElement {
+  children: FakeElement[] = [];
+  parent: FakeElement | undefined;
+  dataset: Record<string, string> = {};
+  className = "";
+  textContent = "";
+  title = "";
+  hidden = false;
+  constructor(readonly tag: string) {}
+  append(...nodes: FakeElement[]) {
+    for (const node of nodes) {
+      node.remove();
+      node.parent = this;
+      this.children.push(node);
+    }
+  }
+  replaceChildren(...nodes: FakeElement[]) {
+    for (const child of [...this.children]) child.remove();
+    this.append(...nodes);
+  }
+  remove() {
+    if (!this.parent) return;
+    this.parent.children.splice(this.parent.children.indexOf(this), 1);
+    this.parent = undefined;
+  }
+}
+
+async function tilePage() {
+  const byId: Record<string, FakeElement> = {};
+  const getElementById = (id: string) => (byId[id] ??= new FakeElement(id));
+  // As in index.html: the empty state starts hidden, until the first state arrives.
+  getElementById("empty").hidden = true;
+  let state!: (event: { data: string }) => void;
+  runInNewContext(SCRIPT, {
+    window: { location: { href: "http://127.0.0.1:8787/", protocol: "http:", search: "" } },
+    document: { getElementById, createElement: (tag: string) => new FakeElement(tag) },
+    URL,
+    URLSearchParams,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    console,
+    fetch: agentHealth,
+    EventSource: class {
+      addEventListener(name: string, listener: (event: { data: string }) => void) {
+        if (name === "state") state = listener;
+      }
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const machines = byId.machines!;
+  const machine = (uuid: string, score: number) => ({
+    machine_uuid: uuid,
+    game_name: `Game ${uuid}`,
+    game_in_progress: false,
+    game_ended: false,
+    scores: [{ position: 1, player: null, score, modes: [], is_nfc_verified: false }],
+  });
+  return {
+    send: (list: unknown[], updatedAt: string | null = "2026-09-28T12:00:00Z") =>
+      state({ data: JSON.stringify({ status: "live", updated_at: updatedAt, machines: list }) }),
+    machine,
+    tiles: () => machines.children.map((card) => card.dataset.machine),
+    tile: (uuid: string) => machines.children.find((card) => card.dataset.machine === uuid)!,
+    empty: byId.empty!,
+  };
+}
+
+describe("overlay tiles", () => {
+  it("adds, updates, reorders and removes tiles keyed by machine_uuid", async () => {
+    const page = await tilePage();
+    page.send([page.machine("a", 10), page.machine("b", 20)]);
+    expect(page.tiles()).toEqual(["a", "b"]);
+    const tileA = page.tile("a");
+
+    // A new machine joins, first in the feed's order: a is updated in place, not rebuilt.
+    page.send([page.machine("c", 30), page.machine("a", 11)]);
+    expect(page.tiles()).toEqual(["c", "a"]);
+    expect(page.tile("a")).toBe(tileA);
+    expect(tileA.children[0]!.textContent).toBe("Game a");
+    expect(tileA.children[2]!.children[0]!.children[1]!.textContent).toBe((11).toLocaleString());
+    expect(page.empty.hidden).toBe(true);
+  });
+
+  it("shows the empty state when the last machine leaves, and hides it when one joins", async () => {
+    const page = await tilePage();
+    expect(page.empty.hidden).toBe(true);
+    page.send([]);
+    expect(page.tiles()).toEqual([]);
+    expect(page.empty.hidden).toBe(false);
+    page.send([page.machine("a", 1)]);
+    expect(page.tiles()).toEqual(["a"]);
+    expect(page.empty.hidden).toBe(true);
+    page.send([]);
+    expect(page.tiles()).toEqual([]);
+    expect(page.empty.hidden).toBe(false);
+  });
+
+  it("shows no empty state before the first publication, only once one says there are none", async () => {
+    const page = await tilePage();
+    // The agent's state before any publication: no machines, updated_at null.
+    page.send([], null);
+    expect(page.empty.hidden).toBe(true);
+    page.send([]);
+    expect(page.empty.hidden).toBe(false);
+    expect(HTML).toMatch(/<p id="empty" class="empty" hidden>/);
+  });
+});

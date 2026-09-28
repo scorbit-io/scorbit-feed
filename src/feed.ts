@@ -6,10 +6,14 @@ import {
   FeedError,
   FeedHttpError,
   type FetchLike,
+  RETRY_MAX_MS,
   TIMER_MAX_MS,
+  jitter,
   checkBaseUrl,
   checkEndpoint,
+  deleteFeedRequest,
   feedUrl,
+  jittered,
   redactedError,
   request,
 } from "./http.js";
@@ -28,14 +32,12 @@ import type {
   Transport,
 } from "./types.js";
 
-// Local pacing after a failure. These are not feed timers: every feed timer
-// (the refresh interval, the token lifetime) comes from the server. The cap
-// sits far below any token lifetime, so an outage gets many attempts first.
-const RETRY_BASE_MS = 1_000;
-const RETRY_MAX_MS = 30_000;
 // A connection must stay live this long before a drop counts as a fresh
 // failure (refresh at once) rather than part of a reconnect storm (back off).
 const STABLE_MS = 30_000;
+// Spreads the refresh after a stable session's drop, so feeds that one server
+// restart dropped together do not all refresh in the same instant.
+const STABLE_REFRESH_SPREAD_MS = 1_000;
 
 const TERMINAL: Partial<Record<number, EndReason>> = {
   401: "unauthorized",
@@ -48,8 +50,6 @@ function reconnectable(code: number | undefined): boolean {
   return code === undefined || (code >= 3000 && code < 3500) || (code >= 4000 && code < 4500);
 }
 
-const backoff = (attempt: number) => Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
-
 export interface AttachOptions {
   feedId: string;
   /**
@@ -60,17 +60,14 @@ export interface AttachOptions {
   /** Defaults to the production API, `https://api.scorbit.io`. Must be https, except on localhost. */
   baseUrl?: string;
   /**
-   * The transport the feed was created with. Advisory: the server's answer
-   * (or the token shape it returns) wins.
+   * The transport the feed was created with. Advisory: the transport every
+   * server reply names wins.
    */
   transport?: Transport;
   /**
-   * The Centrifugo endpoint (`ws_endpoint` or `sse_endpoint` from create).
-   * The heartbeat response does not include the endpoint yet, so attaching
-   * without `initialTokens` needs this.
+   * Tokens already in hand, e.g. the create response: connect without a first
+   * heartbeat. Otherwise the first heartbeat supplies them, endpoint included.
    */
-  endpoint?: string;
-  /** Tokens already in hand, e.g. the create response: connect without a first heartbeat. */
   initialTokens?: FeedTokens | FeedInfo;
   /** A fetch implementation. Defaults to the global `fetch`. */
   fetch?: FetchLike;
@@ -90,6 +87,8 @@ export interface FeedEvents {
 export interface StopOptions {
   /** DELETE the feed on the server as well as disconnecting. Default true. */
   deleteFeed?: boolean;
+  /** Abandons the DELETE, its retries included; the feed then lives on until its TTL. */
+  signal?: AbortSignal;
 }
 
 /** A live attachment to one data feed. Create it with {@link attachFeed}. */
@@ -104,7 +103,6 @@ export class Feed extends Emitter<FeedEvents> {
 
   private currentStatus: FeedStatus = "idle";
   private tokens: FeedTokens | undefined;
-  private endpoint: string | undefined;
   private transportName: Transport | undefined;
   private transport: TransportImpl | undefined;
   private opened = false;
@@ -147,7 +145,6 @@ export class Feed extends Emitter<FeedEvents> {
     this.initialProblem = copy && this.replyProblem(copy);
     const initial = copy && !this.initialProblem ? copy : undefined;
     this.initialTokens = initial;
-    this.endpoint = options.endpoint ?? initial?.ws_endpoint ?? initial?.sse_endpoint;
     const refs = (initial as { machines?: unknown } | undefined)?.machines;
     this.machineSet = machineRefsOk(refs) ? refs.map((machine) => machine.uuid) : [];
   }
@@ -183,23 +180,18 @@ export class Feed extends Emitter<FeedEvents> {
    * on a bad endpoint), and it still deletes the feed then. After the server
    * ended it (`withdrawn`, `ended`, `unauthorized`) there is nothing to delete.
    */
-  async stop({ deleteFeed = true }: StopOptions = {}): Promise<void> {
+  async stop({ deleteFeed = true, signal }: StopOptions = {}): Promise<void> {
     this.end("stopped");
     if (!deleteFeed || this.endReason !== "stopped") return;
-    this.deletion ??= this.deleteOnServer().catch((err: unknown) => {
+    this.deletion ??= this.deleteOnServer(signal).catch((err: unknown) => {
       this.deletion = undefined; // a failed delete may be retried
       throw err;
     });
     return this.deletion;
   }
 
-  private async deleteOnServer(): Promise<void> {
-    try {
-      await request(this.fetchImpl, feedUrl(this.baseUrl, this.feedId), "DELETE", this.feedToken);
-    } catch (err) {
-      // Already gone is the outcome stop() wanted.
-      if (!(err instanceof FeedHttpError && err.status === 404)) throw err;
-    }
+  private deleteOnServer(signal: AbortSignal | undefined): Promise<void> {
+    return deleteFeedRequest(this.fetchImpl, this.baseUrl, this.feedId, this.feedToken, signal);
   }
 
   // A throwing listener must not break the lifecycle: report it, redacted, as an error event.
@@ -268,7 +260,7 @@ export class Feed extends Emitter<FeedEvents> {
   private fail(error: Error, retryAfterMs = 0): void {
     if (!this.emitAlive("error", error)) return;
     this.refreshAttempts += 1;
-    this.schedule(Math.max(backoff(this.refreshAttempts), retryAfterMs));
+    this.schedule(Math.max(jittered(this.refreshAttempts), retryAfterMs));
   }
 
   /** The connection dropped. Reopen at once only after a stable session; otherwise back off. */
@@ -282,12 +274,12 @@ export class Feed extends Emitter<FeedEvents> {
     if (!reconnectable(code)) {
       // The server said not to reconnect: back off hard, and let the heartbeat settle whether the feed is over.
       this.dropAttempts += 1;
-      this.schedule(RETRY_MAX_MS);
+      this.schedule(jitter(RETRY_MAX_MS));
     } else if (stable) {
-      void this.refresh();
+      this.schedule(Math.random() * STABLE_REFRESH_SPREAD_MS);
     } else {
       this.dropAttempts += 1;
-      this.schedule(backoff(this.dropAttempts));
+      this.schedule(jittered(this.dropAttempts));
     }
   }
 
@@ -328,14 +320,8 @@ export class Feed extends Emitter<FeedEvents> {
     }
     if (this.finished) return false;
     // A malformed answer is a failed refresh, retried with backoff, never trusted.
-    const problem =
-      this.replyProblem(tokens) ??
-      (this.opened &&
-      this.transportName === "sdk" &&
-      !tokens.transport &&
-      !tokens.subscription_token
-        ? "subscription_token"
-        : undefined);
+    // Nothing is carried over from an earlier reply: one without its endpoint is malformed.
+    const problem = this.replyProblem(tokens);
     if (problem) this.fail(new FeedError(`malformed heartbeat response: bad ${problem}`));
     else this.apply(tokens);
     return !this.finished;
@@ -347,21 +333,12 @@ export class Feed extends Emitter<FeedEvents> {
     const interval = tokens.heartbeat_interval;
     this.tokens = tokens;
     this.refreshAttempts = 0;
-    const name: Transport = tokens.transport ?? (tokens.subscription_token ? "sdk" : "sse");
-    // The heartbeat response may not carry the endpoint yet: keep the last known
-    // one, but never one for the other transport.
-    const known = this.endpoint && /^wss?:/i.test(this.endpoint) === (name === "sdk");
-    this.endpoint =
-      tokens.ws_endpoint ?? tokens.sse_endpoint ?? (known ? this.endpoint : undefined);
+    const name = tokens.transport;
     try {
-      if (!this.endpoint) {
-        throw new FeedError(
-          "No Centrifugo endpoint for this feed: pass `endpoint` (the ws_endpoint or sse_endpoint from create) to attachFeed",
-        );
-      }
       const session = {
-        endpoint: checkEndpoint(this.endpoint),
-        channel: tokens.channel ?? `data_feed:${this.feedId}`,
+        // Validated: every reply carries its transport's endpoint.
+        endpoint: checkEndpoint((tokens.ws_endpoint ?? tokens.sse_endpoint) as string),
+        channel: tokens.channel,
         connectionToken: tokens.connection_token,
         subscriptionToken: tokens.subscription_token,
       };
@@ -470,5 +447,4 @@ function checkAttachOptions(options: AttachOptions): void {
   }
   if (!options.feedId) throw new FeedError("attachFeed needs a feedId.");
   checkBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL);
-  if (options.endpoint !== undefined) checkEndpoint(options.endpoint);
 }

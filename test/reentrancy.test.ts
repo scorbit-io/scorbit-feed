@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { type AttachOptions, type Feed, type FeedEvents, attachFeed } from "../src/feed.js";
+import { type AttachOptions, Feed, type FeedEvents, attachFeed } from "../src/feed.js";
 import {
   BASE_URL,
   CREATED_SSE,
@@ -113,14 +113,26 @@ const cases: {
     },
   },
   {
-    name: "error from a feed with no endpoint, before it ends itself",
+    name: "error from a heartbeat without its endpoint, before it is retried",
     event: "error",
     drive: async ({ api, feed }) => {
-      api.queue("heartbeat", json(200, heartbeatSse(2)));
+      api.queue("heartbeat", json(200, { ...heartbeatSse(2), sse_endpoint: undefined }));
       feed.start();
       await flush();
     },
     attach: { initialTokens: undefined },
+  },
+  {
+    name: "error from a transport that cannot be created, before the feed ends itself",
+    event: "error",
+    drive: async ({ feed }) => {
+      const target = Feed.prototype as unknown as { createTransport: () => never };
+      vi.spyOn(target, "createTransport").mockImplementationOnce(() => {
+        throw new Error("no transport here");
+      });
+      feed.start();
+      await flush();
+    },
   },
   {
     name: "ended, when the server ended the feed",

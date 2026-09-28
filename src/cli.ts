@@ -2,29 +2,29 @@ import { realpath, stat } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
 import { AgentServer, isLoopbackHost } from "./agent/server.js";
-import { openFeed } from "./create.js";
+import { listMachines, openFeed } from "./create.js";
 import { type Feed, attachFeed } from "./feed.js";
 import { type FetchLike, redact } from "./http.js";
 import type { Transport } from "./types.js";
 
 export const USAGE = `scorbit-feed: a local agent that holds a Scorbit data feed open and serves it to your overlay.
 
+List the machines the API key covers, as JSON:
+  SCORBIT_API_KEY=sb_live_... scorbit-feed machines [--base-url <url>]
+
 Create a feed (the agent deletes it again on exit):
   SCORBIT_API_KEY=sb_live_... scorbit-feed [--machines <uuid,uuid,...>]
 
 Attach to an existing feed (never deleted on exit):
-  SCORBIT_FEED_TOKEN=sbf_... scorbit-feed --feed-id <f_...> --endpoint <url>
+  SCORBIT_FEED_TOKEN=sbf_... scorbit-feed --feed-id <f_...>
 
 Credentials are read from the environment only, never from arguments.
 
 Options:
   --machines <uuid,...>    narrow the feed to these VenueMachine uuids, in order;
-                           omit to stream everything in the key's scope
-                           (scoped keys: planned server support)
+                           omit to stream everything in the key's scope (a
+                           venue-scoped key's feed then follows its venues)
   --feed-id <id>           attach to this feed instead of creating one
-  --endpoint <url>         Centrifugo endpoint for an attached feed (the create
-                           response's ws_endpoint or sse_endpoint); needed
-                           because the heartbeat response does not include it yet
   --transport sdk|sse      default sdk
   --port <n>               default 8787
   --host <addr>            default 127.0.0.1
@@ -38,7 +38,7 @@ Options:
   -h, --help               show this help
 
 Routes: GET /state (latest state per machine), GET /events (Server-Sent
-Events: "status" and "state"), GET /healthz.
+Events: "status", "state" and "machines"), GET /healthz.
 
 Tokens are refreshed on the interval the server sets for each feed, and the
 feed stays alive for as long as the agent stays subscribed.`;
@@ -49,7 +49,10 @@ export interface SignalSource {
 
 export interface CliDeps {
   env: Record<string, string | undefined>;
+  /** Diagnostics (stderr). */
   log: (line: string) => void;
+  /** A command's output (stdout): written as is, one call per result. */
+  out: (text: string) => void;
   exit: (code: number) => void;
   signals: SignalSource;
   fetch?: FetchLike;
@@ -72,7 +75,6 @@ function parse(argv: string[]) {
     options: {
       machines: { type: "string" },
       "feed-id": { type: "string" },
-      endpoint: { type: "string" },
       transport: { type: "string", default: "sdk" },
       port: { type: "string", default: "8787" },
       host: { type: "string", default: "127.0.0.1" },
@@ -122,8 +124,51 @@ function clean(text: string): string {
 
 const messageOf = (err: unknown) => clean((err as Error).message);
 
+/** `scorbit-feed machines`: print what the API key covers, as JSON, and exit. */
+async function machinesCommand(argv: string[], deps: CliDeps): Promise<void> {
+  const log = (line: string) => deps.log(redact(line));
+  let baseUrl: string | undefined;
+  try {
+    const { values } = parseArgs({
+      args: argv,
+      strict: true,
+      allowPositionals: false,
+      options: {
+        "base-url": { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+    if (values.help) {
+      log(USAGE);
+      return deps.exit(0);
+    }
+    if (!deps.env.SCORBIT_API_KEY) throw new UsageError("set SCORBIT_API_KEY to list its machines");
+    baseUrl = values["base-url"];
+  } catch (err) {
+    log(`error: ${messageOf(err)}\n\n${USAGE}`);
+    return deps.exit(2);
+  }
+  try {
+    const scope = await listMachines({
+      apiKey: deps.env.SCORBIT_API_KEY,
+      baseUrl,
+      fetch: deps.fetch,
+    });
+    // JSON escapes control characters, so server text cannot reach the terminal raw.
+    deps.out(JSON.stringify(scope, null, 2));
+    deps.exit(0);
+  } catch (err) {
+    log(`error: ${messageOf(err)}`);
+    deps.exit(1);
+  }
+}
+
 /** Run the agent. Resolves once it is serving, or `undefined` if it exited early. */
 export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle | undefined> {
+  if (argv[0] === "machines") {
+    await machinesCommand(argv.slice(1), deps);
+    return undefined;
+  }
   const log = (line: string) => deps.log(redact(line));
 
   let options: ReturnType<typeof parse>;
@@ -152,10 +197,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   // Every exit goes through finish(): once only, whoever calls first decides
   // the exit code, and it exits only after the feed is stopped (and deleted,
   // if this agent created it) and the server is closed.
+  // A first signal stops the create's retries; one during cleanup abandons the delete.
+  const creating = new AbortController();
+  const deleting = new AbortController();
   let cleaned: Promise<void> | undefined;
   const cleanup = (): Promise<void> =>
     (cleaned ??=
-      feed?.stop({ deleteFeed: created }).catch((err: unknown) => {
+      feed?.stop({ deleteFeed: created, signal: deleting.signal }).catch((err: unknown) => {
         log(`could not delete feed: ${messageOf(err)}`);
       }) ?? Promise.resolve());
   let finishing: Promise<void> | undefined;
@@ -182,7 +230,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   let ready = false;
   let stopRequested = false;
   const onSignal = () => {
+    if (finishStarted && created && !deleting.signal.aborted) {
+      log("exiting without waiting for the delete; the feed may linger until its TTL");
+      deleting.abort();
+      return;
+    }
     stopRequested = true;
+    creating.abort();
     if (ready) void finish(0, stopLine());
   };
   deps.signals.on("SIGINT", onSignal);
@@ -194,7 +248,6 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
       feed = attachFeed({
         feedId: options["feed-id"],
         feedToken,
-        endpoint: options.endpoint,
         transport: options.transport,
         baseUrl: options["base-url"],
         fetch: deps.fetch,
@@ -212,15 +265,18 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
         transport: options.transport,
         baseUrl: options["base-url"],
         fetch: deps.fetch,
+        signal: creating.signal,
       });
       feed = opened.feed;
       // Set at once: anything that fails from here on must delete the feed.
       created = true;
-      const names = opened.created.machines.map((m) => m.game_name).join(", ");
+      const names = opened.created.machines.map((m) => m.game_name).join(", ") || "no machines yet";
       log(`created feed ${clean(feed.feedId)} (${opened.created.transport}) over ${clean(names)}`);
     }
   } catch (err) {
-    await finish(err instanceof UsageError ? 2 : 1, `error: ${messageOf(err)}`);
+    // A signal stopped the create while it waited to retry: nothing was created.
+    if (stopRequested) await finish(0, stopLine());
+    else await finish(err instanceof UsageError ? 2 : 1, `error: ${messageOf(err)}`);
     return undefined;
   }
   if (stopRequested) {
@@ -243,7 +299,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
     agentServer.publishStatus(status);
     log(`feed ${status}`);
   });
-  agentFeed.on("machines", ({ added, removed }) => {
+  agentFeed.on("machines", (change) => {
+    agentServer.publishMachines(change);
+    const { added, removed } = change;
     if (added.length) log(`machines joined: ${clean(added.join(", "))}`);
     if (removed.length) log(`machines left: ${clean(removed.join(", "))}`);
   });

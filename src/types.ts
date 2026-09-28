@@ -7,9 +7,19 @@ export interface FeedMachineRef {
   game_name: string;
 }
 
-/** The heartbeat response (`DataFeedTokensSerializer`): refreshed tokens and timers. */
+/**
+ * The heartbeat response: refreshed tokens and
+ * timers, and the stream they are for. Every heartbeat names the feed's
+ * transport, channel and that transport's endpoint.
+ */
 export interface FeedTokens {
   feed_id: string;
+  channel: string;
+  transport: Transport;
+  /** sdk transport only. */
+  ws_endpoint?: string;
+  /** sse transport only. */
+  sse_endpoint?: string;
   connection_token: string;
   /** sdk transport only. */
   subscription_token?: string;
@@ -19,27 +29,38 @@ export interface FeedTokens {
   token_ttl: number;
   /** Seconds after which to refresh tokens. Server-supplied and per-feed. */
   heartbeat_interval: number;
-  /**
-   * The heartbeat response does not include these yet. Read when present,
-   * otherwise the last known value is used.
-   */
-  transport?: Transport;
-  ws_endpoint?: string;
-  sse_endpoint?: string;
-  delta?: string;
-  channel?: string;
 }
 
-/** The create and PATCH response (`DataFeedSerializer`). */
+/** The create and PATCH response. */
 export interface FeedInfo extends FeedTokens {
-  channel: string;
-  transport: Transport;
+  /**
+   * The machines at create. On a feed that follows its key's venues this is
+   * only the starting set: publications carry the current one.
+   */
   machines: FeedMachineRef[];
+  /** sdk transport only: `fossil`. */
+  delta?: string;
 }
 
-/** The create response (`DataFeedCreatedSerializer`). `feed_token` is shown once. */
+/** The create response. `feed_token` is shown once. */
 export interface CreatedFeed extends FeedInfo {
   feed_token: string;
+}
+
+/** What an API key is scoped to, fixed when the key was generated. */
+export type ScopeType = "venues" | "machines";
+
+/** One machine an API key covers, with its venue. */
+export interface ScopeMachine {
+  uuid: string;
+  game_name: string;
+  venue: { uuid: string; name: string };
+}
+
+/** The discovery response: what the key covers now. */
+export interface MachineScope {
+  scope_type: ScopeType;
+  machines: ScopeMachine[];
 }
 
 export interface FeedPlayer {
@@ -101,9 +122,9 @@ export interface FeedUpdate {
 }
 
 /**
- * The feed's machine set changed. A venue-scoped feed's set is live: machines
- * join and leave as the venue's membership changes (planned server support).
- * Uuids, in feed order.
+ * The feed's machine set changed. A feed created without `machines` on a
+ * venue-scoped key follows its venues: machines join and leave as the venues'
+ * membership changes, and the set may become empty. Uuids, in feed order.
  */
 export interface FeedMachinesChange {
   added: string[];

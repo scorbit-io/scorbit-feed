@@ -15,19 +15,34 @@ All notable changes to this project are documented here. The format follows
   and `sse` (Centrifugo uni_sse read with `fetch`, the connect command sent in a
   POST body so the token stays out of URLs).
 - Token refresh on the server-provided interval; after a Centrifugo disconnect,
-  an immediate refresh following a stable session and backoff otherwise (hard
-  backoff for no-reconnect codes); backoff for transient failures, honouring
-  `Retry-After`; and terminal `ended` reasons (`withdrawn`, `ended`,
-  `unauthorized`, `stopped`).
+  a refresh within a second following a stable session and backoff otherwise
+  (hard backoff for no-reconnect codes); jittered, capped backoff for transient
+  failures and reconnects, honouring `Retry-After`; and terminal `ended` reasons
+  (`withdrawn`, `ended`, `unauthorized`, `stopped`).
+- The Centrifugo endpoint comes from each heartbeat, which names its transport,
+  channel and endpoint.
+- A `503` is retried, never terminal: the API's own create `503` (data feeds
+  switched off, or live feeds uncountable) and a delete's `503` a bounded number
+  of times, and a heartbeat's (a feed-store outage) for as long as the feed runs.
+  A delete's `409` is retried once, and its `429` when `Retry-After` allows. An
+  `AbortSignal` stops a create's or a delete's retries. Errors read the API's
+  standardized error bodies, `code` included. README documents every status per
+  call.
 - A throwing event listener cannot break the feed's lifecycle.
-- Key-scoped feeds (planned server support): `machines` is optional and omitting
-  it streams the key's whole scope; a venue-scoped feed's machine set is live,
-  reported through the `machines` event and `feed.machines`.
+- Scoped API keys: `listMachines` (and `scorbit-feed machines`) lists what a key
+  covers, with each machine's venue; `machines` is optional on create and
+  omitting it streams the key's whole scope, with `FeedScopeTooLargeError` when
+  that is more than one feed carries.
+- Feeds that follow their venues: a create without `machines` on a
+  venue-scoped key gains and loses machines while it runs, and may carry none.
+  Changes are reported through the `machines` event and `feed.machines`, and the
+  agent's `/events` stream sends them as `machines` events.
 - The `scorbit-feed` agent: serves `/state`, `/events` and `/healthz` on
   localhost (loopback `Host` only), optionally serves overlay files (known file
   types, no dotfiles), and deletes a feed it created on exit.
-- A starter overlay in `templates/overlay/` whose attribution slot shows the
-  Scorbit logo, as the [developer terms](https://scorbit.io/developer-terms-of-use/)
+- A starter overlay in `templates/overlay/` with one tile per machine, keyed by
+  `machine_uuid` and added or removed as machines join and leave, an empty
+  state, and an attribution slot that shows the Scorbit logo, as the [developer terms](https://scorbit.io/developer-terms-of-use/)
   require.
 - Scorbit® logo files in `assets/brand/` (repository only). SCORBIT® and the
   Scorbit logo are registered trademarks of Spinner Systems, Inc.; the logo

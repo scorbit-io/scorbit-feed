@@ -56,27 +56,40 @@ what it needs:
   example an authenticated `fetch` from the page, or a value rendered into the
   page), never in the page's address.
 
-### Key scope and machine sets (planned server support)
+### Scoped keys, discovery and following feeds
 
-> The server does not support this section yet. The library already codes
-> against it.
+Every API key carries a scope, chosen when the key is generated: whole venues,
+or specific machines. `listMachines` asks what a key covers right now (each
+machine's uuid, game name and venue); a machine the account no longer owns is
+simply absent. Like `createFeed`, it needs the API key and runs server-side only.
 
-An API key will carry a scope, chosen when the key is generated: whole venues,
-or specific machines. Creating a feed **without** `machines` streams everything
-in the key's scope; passing `machines` only narrows it. An empty `machines` list
-is refused rather than read as "everything".
+Creating a feed **without** `machines` streams the key's whole scope; passing
+`machines` narrows it to a subset, in your order. An empty `machines` list is
+refused rather than read as "everything". A scope larger than one feed can carry
+is refused with a `FeedScopeTooLargeError` (a `400`): pass `machines` with a
+subset.
 
-A venue-scoped feed has a **live** machine set: machines join and leave a running
-feed as the venue's membership changes. Never assume the list from create is
-fixed. The feed emits a `machines` event (`{ added, removed, machines }`) whenever
-the set in a published update differs from the last one, and `feed.machines`
-holds the current set. A machine-scoped feed still ends (`403`/`404`) when one of
-its machines leaves.
-
-A key-authenticated discovery endpoint listing a key's machines (uuid, game name,
-venue) is planned; this library does not call it yet.
+A feed created without `machines` on a **venue-scoped** key **follows** its
+venues: machines join and leave the running feed as the venues' membership
+changes, and the set may become empty (a venue with no machines yet, or after
+the last one left) without the feed ending. Every published update carries the
+current machine list, which is authoritative: key tiles by `machine_uuid`, never
+by position, and never assume the list from create is fixed. The feed emits a
+`machines` event (`{ added, removed, machines }`) whenever the set in an update
+differs from the last one, and `feed.machines` holds the current set. Every other
+feed (a machine-scoped key's, or one created with `machines`) is fixed: it ends
+(`403` or `404`) when one of its machines leaves.
 
 ## Usage
+
+### Server or agent: see what the key covers
+
+```ts
+import { listMachines } from "@scorbit/feed";
+
+const { scope_type, machines } = await listMachines({ apiKey: process.env.SCORBIT_API_KEY! });
+for (const m of machines) console.log(m.uuid, m.game_name, m.venue.name);
+```
 
 ### Server or agent: create and attach in one step
 
@@ -89,7 +102,9 @@ const { feed, created } = await openFeed({
   transport: "sdk", // or "sse"
 });
 
+feed.on("machines", ({ added, removed }) => console.log("joined", added, "left", removed));
 feed.on("update", (update) => {
+  // The current set, possibly empty: key what you render by machine_uuid.
   for (const machine of update.payload.machines) {
     console.log(
       machine.game_name,
@@ -111,7 +126,8 @@ await feed.stop();
 
 Create the feed on your server, then hand the browser only `feed_id`,
 `feed_token` and the endpoint, in a response body rather than a URL (see
-[Credentials](#credentials)):
+[Credentials](#credentials)). Without `initialTokens` the feed's first heartbeat
+supplies everything it needs:
 
 ```ts
 import { attachFeed } from "@scorbit/feed";
@@ -119,7 +135,6 @@ import { attachFeed } from "@scorbit/feed";
 const feed = attachFeed({
   feedId,
   feedToken, // sbf_...
-  endpoint, // ws_endpoint or sse_endpoint from the create response
 });
 feed.on("update", render);
 feed.start();
@@ -127,19 +142,20 @@ feed.start();
 
 ### API
 
-| Function                           | Returns                      | Notes                                                                                        |
-| ---------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `createFeed(options)`              | `Promise<CreatedFeed>`       | `{ apiKey, machines, transport?, baseUrl?, fetch?, dangerouslyAllowBrowser? }`               |
-| `attachFeed(options)`              | `Feed`                       | `{ feedId, feedToken, baseUrl?, transport?, endpoint?, initialTokens?, fetch?, websocket? }` |
-| `openFeed(options)`                | `Promise<{ feed, created }>` | `createFeed` then `attachFeed` with the create response as the first tokens                  |
-| `feed.start()`                     | `void`                       | Connect and keep the tokens fresh                                                            |
-| `feed.stop({ deleteFeed = true })` | `Promise<void>`              | Disconnect, stop all timers, and by default delete the feed                                  |
-| `feed.on(event, listener)`         | unsubscribe function         | Events below                                                                                 |
+| Function                           | Returns                      | Notes                                                                             |
+| ---------------------------------- | ---------------------------- | --------------------------------------------------------------------------------- |
+| `listMachines(options)`            | `Promise<MachineScope>`      | `{ apiKey, baseUrl?, fetch?, dangerouslyAllowBrowser? }`                          |
+| `createFeed(options)`              | `Promise<CreatedFeed>`       | `{ apiKey, machines?, transport?, baseUrl?, fetch?, dangerouslyAllowBrowser? }`   |
+| `attachFeed(options)`              | `Feed`                       | `{ feedId, feedToken, baseUrl?, transport?, initialTokens?, fetch?, websocket? }` |
+| `openFeed(options)`                | `Promise<{ feed, created }>` | `createFeed` then `attachFeed` with the create response as the first tokens       |
+| `feed.start()`                     | `void`                       | Connect and keep the tokens fresh                                                 |
+| `feed.stop({ deleteFeed = true })` | `Promise<void>`              | Disconnect, stop all timers, and by default delete the feed                       |
+| `feed.on(event, listener)`         | unsubscribe function         | Events below                                                                      |
 
 Events:
 
-- `update`: a `data_feed_update` message, every machine the feed covers, in the
-  order requested. `game_ended` is true when the last game finished and the
+- `update`: a `data_feed_update` message, every machine the feed covers now, in
+  the feed's order (possibly none, on a feed that follows its venues). `game_ended` is true when the last game finished and the
   scores are final; both device generations are normalised onto it by the server.
 - `machines`: `{ added, removed, machines }` (uuids), when the feed's machine set
   changes. Emitted before the `update` that carried the change.
@@ -147,6 +163,10 @@ Events:
 - `ended`: `{ reason }`, see below.
 - `error`: a non-fatal problem (a failed refresh that will be retried, a dropped
   connection). Messages never contain a credential.
+
+What the library throws is a `FeedError`; an answer from the API is a
+`FeedHttpError` with its `status`, the API's `detail` text and error `code`, and a scope too large for one feed a
+`FeedScopeTooLargeError`.
 
 `baseUrl` defaults to `https://api.scorbit.io`.
 
@@ -173,55 +193,84 @@ Both carry the same messages.
   never on a compiled-in number, and the tokens it returns last `token_ttl`
   seconds.
 - **Disconnects.** When Centrifugo closes a connection that had been live for a
-  while, the library refreshes the tokens and reconnects at once. A connection
-  that drops soon after connecting backs off exponentially instead, so a server
+  while, the library refreshes the tokens and reconnects within a second (spread
+  at random, so feeds dropped together do not refresh together). A connection
+  that drops soon after connecting backs off exponentially, with jitter, instead, so a server
   that keeps disconnecting cannot cause a refresh storm; the backoff resets only
   after a sustained live session. Codes Centrifugo marks as "do not reconnect"
   (3500–3999, 4500–4999) back off to the maximum, and the next heartbeat settles
   whether the feed is over.
-- **Transient failures** (network errors, 5xx, 429) are retried with a capped
-  exponential backoff, well inside the token lifetime, and never sooner than a
-  `Retry-After` header asks. The connection's status is left alone while a
-  refresh is being retried.
+- **Every heartbeat names its stream**: the transport, the channel and that
+  transport's endpoint. Once connected, the library takes the endpoint from each
+  heartbeat and from nothing else: a reply without one is malformed and retried,
+  and nothing is carried over from the create response.
 - **Listener errors.** A listener that throws cannot break the lifecycle: its
   exception is emitted as an `error` event (an `error` listener's own exception
   is re-thrown outside the feed).
-- **Terminal answers are never retried.** They end the feed with a reason:
+- **Terminal answers are never retried.** A heartbeat's `401`, `403` or `404`
+  ends the feed; see the tables below.
 
-| `reason`       | Cause                           | What it means                                                          |
-| -------------- | ------------------------------- | ---------------------------------------------------------------------- |
-| `withdrawn`    | heartbeat `403`                 | Authorization was withdrawn and the server deleted the feed            |
-| `ended`        | heartbeat `404`                 | The feed no longer exists: deleted, or unwatched past its grace period |
-| `unauthorized` | heartbeat `401`                 | The feed token is not valid for this feed                              |
-| `stopped`      | `stop()`, or no usable endpoint | Ended locally                                                          |
+### Status codes and retries
+
+Retries use a capped exponential backoff with jitter (1 s doubling to 30 s, each
+wait somewhere in the upper half of that), well inside the token lifetime, and
+never sooner than a `Retry-After` header asks. A heartbeat retry leaves the
+connection's status alone. A create or a delete makes at most four attempts, and
+surfaces the answer at once rather than wait longer than 30 s. Pass `signal` (an
+`AbortSignal`) to `createFeed` or `listMachines`, or to `feed.stop()`, to give up
+early: a create stops between attempts but never abandons one in flight, whose
+answer says whether the feed exists; a delete stops at once, and the feed then
+lives on until the server drops it.
+
+| Call      | Answer                   | What the library does                                                                                                           |
+| --------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| create    | `201`                    | Returns the feed                                                                                                                |
+| create    | `400`                    | Throws; `FeedScopeTooLargeError` when no `machines` were sent and the scope is too large for one feed                           |
+| create    | `403`                    | Throws: a machine outside the key's scope or not the account's (never says which), or a suspended account                       |
+| create    | the API's own `503`      | Retried: data feeds are switched off, or live feeds cannot be counted. Nothing was created                                      |
+| create    | anything else            | Throws, not retried: `429`, other 5xx (a proxy's `503` included) or a network error, after which the feed may have been created |
+| heartbeat | `200`                    | New tokens and endpoint; the next refresh on the reply's `heartbeat_interval`                                                   |
+| heartbeat | `401`                    | Ends the feed: `unauthorized`                                                                                                   |
+| heartbeat | `403`                    | Ends the feed: `withdrawn` (authorization withdrawn, account suspended, or data feeds switched off)                             |
+| heartbeat | `404`                    | Ends the feed: `ended`                                                                                                          |
+| heartbeat | `503`, other 5xx, `429`  | Retried, never terminal; a `503` is a feed-store outage                                                                         |
+| heartbeat | network error, bad reply | Retried                                                                                                                         |
+| delete    | `204`, `404`             | Done: deleted, or already gone                                                                                                  |
+| delete    | `503`                    | Retried: the feed store is unreachable and nothing was deleted                                                                  |
+| delete    | `429`                    | Retried, when its `Retry-After` is at most 30 s                                                                                 |
+| delete    | `409`                    | Retried once: the record was rewritten on every attempt, which the API asks the client to retry                                 |
+| delete    | anything else            | `stop()` rejects; calling it again tries again                                                                                  |
+
+The end reasons:
+
+| `reason`       | Cause                                       | What it means                                                          |
+| -------------- | ------------------------------------------- | ---------------------------------------------------------------------- |
+| `withdrawn`    | heartbeat `403`                             | Authorization was withdrawn and the server deleted the feed            |
+| `ended`        | heartbeat `404`                             | The feed no longer exists: deleted, or unwatched past its grace period |
+| `unauthorized` | heartbeat `401`                             | The feed token is not valid for this feed                              |
+| `stopped`      | `stop()`, or a connection that cannot start | Ended locally                                                          |
 
 Nothing is emitted, and no request or timer runs, after a feed has ended.
-
-### Heartbeat endpoint
-
-The heartbeat response carries tokens and timers but does **not** include the
-Centrifugo endpoint (`ws_endpoint` / `sse_endpoint`) yet. The library takes the
-endpoint from each heartbeat response when it is present and otherwise keeps the
-last one it knew: from the create response, from `initialTokens`, or from the
-`endpoint` option. Until the response includes it, attaching without
-`initialTokens` needs `endpoint`.
 
 ### URLs
 
 `baseUrl` must be `https://`, and an endpoint `wss://` or `https://`; plain
 `http://` and `ws://` are accepted only for `localhost`, `127.0.0.1` and `[::1]`.
-Both are checked before any request.
+`baseUrl` is checked before any request, and an endpoint before it is used.
 
 ## The agent: `scorbit-feed`
 
 ```sh
+# List what the key covers (uuid, game name, venue), as JSON on stdout.
+SCORBIT_API_KEY=sb_live_... npx scorbit-feed machines
+
 # Create a feed; the agent deletes it again when it exits.
 SCORBIT_API_KEY=sb_live_... npx scorbit-feed --machines <uuid>,<uuid>
-# ...or over everything in the key's scope (planned server support)
+# ...or over everything in the key's scope (a venue-scoped key's feed follows its venues)
 SCORBIT_API_KEY=sb_live_... npx scorbit-feed
 
 # Attach to a feed created elsewhere; the agent never deletes it.
-SCORBIT_FEED_TOKEN=sbf_... npx scorbit-feed --feed-id f_... --endpoint <ws_endpoint or sse_endpoint>
+SCORBIT_FEED_TOKEN=sbf_... npx scorbit-feed --feed-id f_...
 ```
 
 Credentials come from the environment only, never from arguments, and are never
@@ -231,7 +280,6 @@ logged or served.
 | ------------------------ | ------------------------ | --------------------------------------------------------- |
 | `--machines <uuid,...>`  | key's whole scope        | Narrow the feed to these machines, in order (create mode) |
 | `--feed-id <id>`         |                          | Attach instead of create (needs `SCORBIT_FEED_TOKEN`)     |
-| `--endpoint <url>`       |                          | Centrifugo endpoint for an attached feed                  |
 | `--transport sdk\|sse`   | `sdk`                    |                                                           |
 | `--port <n>`             | `8787`                   |                                                           |
 | `--host <addr>`          | `127.0.0.1`              | Anything else exposes the feed to your network            |
@@ -245,7 +293,9 @@ Routes:
 - `GET /state`: `{ status, updated_at, machines }`, the latest state per machine.
   Machines that leave a live feed drop out; the agent logs joins and leaves.
 - `GET /events`: Server-Sent Events. `status` events carry `{ status }`; `state`
-  events carry the same body as `/state`. The current values are sent on connect.
+  events carry the same body as `/state`; `machines` events carry
+  `{ added, removed, machines }` when the set changes, just before the `state`
+  that carries it. The current status and state are sent on connect.
 - `GET /healthz`: `200` while the feed is running, `503` once it has ended. The
   body is `{ ok, status, agent: "scorbit-feed" }`.
 
@@ -268,7 +318,9 @@ and exits.
 ## Starter overlay
 
 `templates/overlay/` is a dependency-free overlay that renders the agent's
-`/events` stream as one card per machine:
+`/events` stream as one card per machine, keyed by `machine_uuid`: cards are
+added, updated in place and removed as machines join and leave a following feed,
+and a "No machines in this feed yet" line shows while the feed carries none:
 
 ```sh
 SCORBIT_API_KEY=sb_live_... npx scorbit-feed --machines <uuid> \

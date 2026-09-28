@@ -8,6 +8,7 @@ import {
   BASE_URL,
   CREATED_SDK,
   CREATED_SSE,
+  ERRORS,
   FEED_TOKEN,
   MACHINE_A,
   MACHINE_B,
@@ -106,7 +107,7 @@ describe("createFeed", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  it("sends no machines field when machines is omitted: the key's whole scope (pending server support)", async () => {
+  it("sends no machines field when machines is omitted: the key's whole scope", async () => {
     const api = fakeApi();
     api.queue("create", json(201, CREATED_SDK));
     await createFeed({ apiKey: API_KEY, baseUrl: BASE_URL, fetch: api.fetch });
@@ -115,10 +116,7 @@ describe("createFeed", () => {
 
   it("surfaces an API refusal as an error without the key in it", async () => {
     const api = fakeApi();
-    api.queue(
-      "create",
-      json(403, { detail: "One or more machines are not available to this account." }),
-    );
+    api.queue("create", json(403, ERRORS.machinesUnavailable));
     const error = await createFeed({
       apiKey: API_KEY,
       machines: [MACHINE_A],

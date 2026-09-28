@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
-import type { FeedMachineState, FeedStatus, FeedUpdate } from "../types.js";
+import type { FeedMachineState, FeedMachinesChange, FeedStatus, FeedUpdate } from "../types.js";
 
 const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/;
 // Routes a page opened from file:// may read when --allow-file-origin is set.
@@ -143,6 +143,11 @@ export class AgentServer {
     this.machines = update.payload.machines;
     this.updatedAt = update.metadata?.updated_at ?? null;
     this.broadcast(sseFrame("state", this.snapshot()));
+  }
+
+  /** The feed's machine set changed; the `state` that follows carries the new set. */
+  publishMachines(change: FeedMachinesChange): void {
+    this.broadcast(sseFrame("machines", change));
   }
 
   publishStatus(status: FeedStatus): void {

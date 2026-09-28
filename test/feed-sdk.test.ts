@@ -9,6 +9,7 @@ import {
   API_KEY,
   BASE_URL,
   CREATED_SDK,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   WS_ENDPOINT,
@@ -52,11 +53,14 @@ function setup(extra: Partial<AttachOptions> = {}) {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // No jitter: each wait is the top of its range (jitter has its own tests).
+  vi.spyOn(Math, "random").mockReturnValue(0);
   FakeCentrifuge.instances = [];
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("attachFeed credential guard", () => {
@@ -150,8 +154,8 @@ describe("sdk transport: connecting", () => {
     expect(errors.map((e) => e.message)).toEqual(["centrifugo transport error: bad [redacted]"]);
   });
 
-  it("attaches without tokens in hand: heartbeat first, endpoint from the caller", async () => {
-    const { api, feed } = setup({ initialTokens: undefined, endpoint: WS_ENDPOINT });
+  it("attaches without tokens in hand: heartbeat first, endpoint from the heartbeat", async () => {
+    const { api, feed } = setup({ initialTokens: undefined });
     api.queue("heartbeat", json(200, heartbeatSdk(2)));
     feed.start();
     await flush();
@@ -160,7 +164,7 @@ describe("sdk transport: connecting", () => {
       method: "POST",
       headers: { Authorization: `Bearer ${FEED_TOKEN}` },
     });
-    // The heartbeat names no channel; it is derived from the feed id.
+    expect(FakeCentrifuge.last.endpoint).toBe(WS_ENDPOINT);
     expect(FakeCentrifuge.last.sub.channel).toBe(`data_feed:${FEED_ID}`);
     expect(FakeCentrifuge.last.options.token).toBe(jwt("conn2"));
   });
@@ -169,7 +173,6 @@ describe("sdk transport: connecting", () => {
     // Rejected tokens are not trusted for anything, their endpoint included.
     const { api, feed } = setup({
       initialTokens: { ...CREATED_SDK, heartbeat_interval: 0 },
-      endpoint: WS_ENDPOINT,
     });
     api.queue("heartbeat", json(200, heartbeatSdk(2)));
     feed.start();
@@ -179,16 +182,35 @@ describe("sdk transport: connecting", () => {
     expect(FakeCentrifuge.last.options.token).toBe(jwt("conn2"));
   });
 
-  it("ends locally, without deleting, when no endpoint is known", async () => {
+  it("never connects on a heartbeat without its endpoint: it is retried, not ended", async () => {
     const { api, feed, ended, errors } = setup({ initialTokens: undefined });
-    api.queue("heartbeat", json(200, heartbeatSdk(2)));
+    api.queue("heartbeat", json(200, { ...heartbeatSdk(2), ws_endpoint: undefined }));
     feed.start();
     await flush();
-    expect(errors[0]!.message).toMatch(/pass `endpoint`/);
-    expect(ended).toEqual(["stopped"]);
-    expect(api.count("delete")).toBe(0);
+    expect(errors.map((e) => e.message)).toEqual(["malformed heartbeat response: bad ws_endpoint"]);
+    expect(ended).toEqual([]);
     expect(FakeCentrifuge.instances).toHaveLength(0);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("takes no endpoint from the create response after the first connect", async () => {
+    const { api, feed, errors } = setup();
+    // The create response connected the feed; this refresh omits its endpoint.
+    api.queue(
+      "heartbeat",
+      json(200, { ...heartbeatSdk(2), ws_endpoint: undefined }),
+      json(200, heartbeatSdk(3)),
+    );
+    feed.start();
+    const client = FakeCentrifuge.last;
+    client.emit("disconnected", { code: 3503, reason: "force disconnect" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    // Rejected rather than reopened on the endpoint from create.
+    expect(errors.map((e) => e.message)).toEqual(["malformed heartbeat response: bad ws_endpoint"]);
+    expect(FakeCentrifuge.instances).toEqual([client]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(FakeCentrifuge.instances).toHaveLength(2);
+    expect(FakeCentrifuge.last.options.token).toBe(jwt("conn3"));
   });
 });
 
@@ -251,7 +273,7 @@ describe("sdk transport: token refresh", () => {
 
   it("tells the SDK to give up (UnauthorizedError) once the feed has ended", async () => {
     const { api, feed, ended } = setup();
-    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    api.queue("heartbeat", json(404, ERRORS.notFound));
     feed.start();
     await expect(FakeCentrifuge.last.options.getToken()).rejects.toBeInstanceOf(UnauthorizedError);
     expect(ended).toEqual(["ended"]);
@@ -268,7 +290,7 @@ describe("sdk transport: token refresh", () => {
 
   it("makes the SDK retry (plain error) when a refresh fails transiently", async () => {
     const { api, feed, errors } = setup();
-    api.queue("heartbeat", json(503, { detail: "unavailable" }));
+    api.queue("heartbeat", json(503, ERRORS.storeUnavailable));
     feed.start();
     const error = await FakeCentrifuge.last.options.getToken().catch((e) => e);
     expect(error).toBeInstanceOf(FeedError);
@@ -289,12 +311,13 @@ describe("sdk transport: token refresh", () => {
   });
 
   it("retries transient failures with backoff, keeps the connection's status, and recovers", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const { api, feed, errors, statuses } = setup();
     api.queue(
       "heartbeat",
       json(503),
       new TypeError(`fetch failed for ${FEED_TOKEN}`),
-      json(429, { detail: "Request was throttled." }),
+      json(429, ERRORS.throttled),
       json(200, heartbeatSdk(2)),
       json(200, heartbeatSdk(3)),
     );
@@ -320,6 +343,7 @@ describe("sdk transport: token refresh", () => {
   });
 
   it("caps the backoff", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const { api, feed } = setup();
     api.queue("heartbeat", ...Array.from({ length: 8 }, () => json(502)));
     feed.start();
@@ -330,6 +354,28 @@ describe("sdk transport: token refresh", () => {
     expect(api.count("heartbeat")).toBe(7);
     await vi.advanceTimersByTimeAsync(1);
     expect(api.count("heartbeat")).toBe(8);
+  });
+
+  it.each([
+    ["the feed store is unavailable", json(503, ERRORS.storeUnavailable)],
+    ["a bare 503", json(503)],
+  ])("retries a 503 (%s) with jittered backoff, never ending the feed", async (_label, answer) => {
+    // Jitter keeps a retry in the upper half of the backoff: 1s becomes 750ms here.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { api, feed, ended, errors } = setup();
+    api.queue("heartbeat", answer, json(503), json(200, heartbeatSdk(2)));
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(749);
+    expect(api.count("heartbeat")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.count("heartbeat")).toBe(2);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(api.count("heartbeat")).toBe(3);
+    expect(errors.map((e) => e.message)[0]).toMatch(/^heartbeat failed: Scorbit API answered 503/);
+    expect(ended).toEqual([]);
+    expect(feed.status).toBe("connecting");
+    await expect(FakeCentrifuge.last.options.getToken()).resolves.toBe(jwt("conn2"));
   });
 
   it("handles a non-Error rejection from fetch as transient", async () => {
@@ -343,23 +389,28 @@ describe("sdk transport: token refresh", () => {
 
 describe("sdk transport: terminal answers", () => {
   it.each([
-    [401, "unauthorized"],
-    [403, "withdrawn"],
-    [404, "ended"],
-  ] as const)("a %i heartbeat ends the feed as %s and is never retried", async (status, reason) => {
-    const { api, feed, ended, statuses } = setup();
-    api.queue("heartbeat", json(status, { detail: "x" }), json(200, heartbeatSdk(2)));
-    feed.start();
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(ended).toEqual([reason]);
-    expect(statuses.at(-1)).toBe("ended");
-    expect(FakeCentrifuge.last.disconnectCalls).toBe(1);
-    expect(vi.getTimerCount()).toBe(0);
+    [401, "unauthorized", ERRORS.badFeedToken],
+    [403, "withdrawn", ERRORS.withdrawn],
+    [403, "withdrawn", ERRORS.feedsSwitchedOff],
+    [403, "withdrawn", ERRORS.suspended],
+    [404, "ended", ERRORS.notFound],
+  ] as const)(
+    "a %i heartbeat ends the feed as %s and is never retried",
+    async (status, reason, body) => {
+      const { api, feed, ended, statuses } = setup();
+      api.queue("heartbeat", json(status, body), json(200, heartbeatSdk(2)));
+      feed.start();
+      await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+      expect(ended).toEqual([reason]);
+      expect(statuses.at(-1)).toBe("ended");
+      expect(FakeCentrifuge.last.disconnectCalls).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
 
-    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
-    expect(api.count("heartbeat")).toBe(1);
-    expect(api.count("delete")).toBe(0);
-  });
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+      expect(api.count("heartbeat")).toBe(1);
+      expect(api.count("delete")).toBe(0);
+    },
+  );
 });
 
 describe("sdk transport: disconnects", () => {
@@ -393,10 +444,7 @@ describe("sdk transport: disconnects", () => {
 
   it("treats a server-side unsubscribe like a disconnect, and ignores a local one", async () => {
     const { api, feed } = setup();
-    api.queue(
-      "heartbeat",
-      json(403, { detail: "Authorization for this feed has been withdrawn." }),
-    );
+    api.queue("heartbeat", json(403, ERRORS.withdrawn));
     feed.start();
     FakeCentrifuge.last.sub.emit("unsubscribed", { code: 0, reason: "unsubscribe called" });
     await flush();
@@ -423,7 +471,7 @@ describe("sdk transport: disconnects", () => {
     expect(FakeCentrifuge.last.options.token).toBe(jwt("conn2"));
   });
 
-  it("takes the endpoint from the heartbeat when present, else keeps the last known one", async () => {
+  it("takes the endpoint from every heartbeat", async () => {
     const moved = "wss://moved.test.invalid/connection/websocket";
     const { api, feed } = setup();
     api.queue(
@@ -575,10 +623,7 @@ describe("sdk transport: stop", () => {
   });
 
   it("does no work when a heartbeat resolves after stop", async () => {
-    const { api, feed, statuses, errors } = setup({
-      initialTokens: undefined,
-      endpoint: WS_ENDPOINT,
-    });
+    const { api, feed, statuses, errors } = setup({ initialTokens: undefined });
     const pending = deferred<Response>();
     api.queue("heartbeat", () => pending.promise);
     feed.start();
@@ -593,7 +638,7 @@ describe("sdk transport: stop", () => {
   });
 
   it("does no work when a heartbeat fails after stop", async () => {
-    const { api, feed, ended, errors } = setup({ initialTokens: undefined, endpoint: WS_ENDPOINT });
+    const { api, feed, ended, errors } = setup({ initialTokens: undefined });
     const pending = deferred<Response>();
     api.queue("heartbeat", () => pending.promise);
     feed.start();
@@ -609,7 +654,7 @@ describe("sdk transport: stop", () => {
 
   it("deletes once, treats an already-deleted feed as success, and surfaces other failures", async () => {
     const a = setup();
-    a.api.queue("delete", json(404, { detail: "Feed not found." }));
+    a.api.queue("delete", json(404, ERRORS.notFound));
     await expect(a.feed.stop()).resolves.toBeUndefined();
     await a.feed.stop();
     expect(a.api.count("delete")).toBe(1);

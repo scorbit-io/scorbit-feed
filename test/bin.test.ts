@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe("bin entry point", () => {
-  it("runs main with the process arguments, environment, signals and a timestamped stderr log", async () => {
+  it("runs main with the process arguments, environment, signals, a timestamped stderr log and plain stdout", async () => {
     await import("../src/bin.js");
     expect(main).toHaveBeenCalledTimes(1);
     const [argv, deps] = main.mock.calls[0]!;
@@ -23,6 +23,10 @@ describe("bin entry point", () => {
     expect(write).toHaveBeenCalledWith(
       expect.stringMatching(/^\[scorbit-feed\] \d{4}-\d\d-\d\dT[^ ]+ hello\n$/),
     );
+
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    deps.out('{"a":1}');
+    expect(out).toHaveBeenCalledWith('{"a":1}\n');
 
     const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
     deps.exit(3);
