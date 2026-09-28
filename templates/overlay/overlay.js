@@ -60,6 +60,7 @@
     ended: "Live feed ended",
   };
   var machinesEl = document.getElementById("machines");
+  var emptyEl = document.getElementById("empty");
 
   function setStatus(status) {
     var known = Object.prototype.hasOwnProperty.call(STATUS_LABELS, status);
@@ -90,32 +91,51 @@
     return machine.game_ended ? "Final scores" : "Waiting for a game";
   }
 
+  // One tile per machine, keyed by machine_uuid: a feed that follows its venues
+  // gains and loses machines while it runs, so position means nothing.
+  var tiles = new Map();
+
+  function fillTile(card, machine) {
+    var title = document.createElement("h2");
+    title.textContent = machine.game_name || "Machine";
+    var state = document.createElement("div");
+    state.className = "state";
+    state.textContent = machineState(machine);
+    var list = document.createElement("ol");
+    machine.scores.forEach(function (score) {
+      var row = document.createElement("li");
+      var name = document.createElement("span");
+      name.textContent = playerName(score);
+      var value = document.createElement("span");
+      value.textContent = Number(score.score).toLocaleString();
+      row.append(name, value);
+      list.append(row);
+    });
+    card.replaceChildren(title, state, list);
+  }
+
   function render(machines) {
-    machinesEl.replaceChildren();
+    var seen = new Set();
     machines.forEach(function (machine) {
-      var card = document.createElement("section");
-      card.className = "machine";
-      card.dataset.machine = machine.machine_uuid;
-
-      var title = document.createElement("h2");
-      title.textContent = machine.game_name || "Machine";
-      var state = document.createElement("div");
-      state.className = "state";
-      state.textContent = machineState(machine);
-      var list = document.createElement("ol");
-      machine.scores.forEach(function (score) {
-        var row = document.createElement("li");
-        var name = document.createElement("span");
-        name.textContent = playerName(score);
-        var value = document.createElement("span");
-        value.textContent = Number(score.score).toLocaleString();
-        row.append(name, value);
-        list.append(row);
-      });
-
-      card.append(title, state, list);
+      var uuid = machine.machine_uuid;
+      seen.add(uuid);
+      var card = tiles.get(uuid);
+      if (!card) {
+        card = document.createElement("section");
+        card.className = "machine";
+        card.dataset.machine = uuid;
+        tiles.set(uuid, card);
+      }
+      fillTile(card, machine);
+      // Appending an existing tile moves it, so the tiles follow the feed's order.
       machinesEl.append(card);
     });
+    tiles.forEach(function (card, uuid) {
+      if (seen.has(uuid)) return;
+      card.remove();
+      tiles.delete(uuid);
+    });
+    emptyEl.hidden = machines.length > 0;
   }
 
   // EventSource reconnects by itself if the agent restarts.

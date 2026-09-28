@@ -67,6 +67,14 @@ body {
   padding: 16px;
 }
 
+.empty {
+  margin: 16px;
+  color: var(--muted);
+}
+.empty[hidden] {
+  display: none;
+}
+
 .machine {
   flex: 1 1 18rem;
   min-width: 18rem;

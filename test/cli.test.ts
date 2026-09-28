@@ -11,9 +11,11 @@ import {
   BASE_URL,
   CREATED_SDK,
   CREATED_SSE,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   MACHINE_A,
+  SCOPE_VENUES,
   SSE_ENDPOINT,
   heartbeatSse,
 } from "./fixtures/api.js";
@@ -123,7 +125,7 @@ describe("scorbit-feed argument handling", () => {
     h.noSecrets();
   });
 
-  it("omits machines to stream everything in the key's scope (pending server support)", async () => {
+  it("omits machines to stream everything in the key's scope", async () => {
     const h = harness({ SCORBIT_API_KEY: API_KEY });
     h.api.queue("create", json(201, CREATED_SSE));
     h.api.queue("sse", (init) => sseStream().respond(init));
@@ -236,6 +238,39 @@ describe("scorbit-feed agent (create mode)", () => {
     expect(state.machines.map((m: { machine_uuid: string }) => m.machine_uuid)).toEqual([
       b!.machine_uuid,
     ]);
+  });
+
+  it("streams machine-set changes over /events, down to an empty feed", async () => {
+    const { stream, handle } = await running();
+    const [a] = UPDATE.payload.machines;
+    const events = await fetch(`${handle.url}/events`);
+    const reader = events.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const until = async (needle: string) => {
+      while (!text.includes(needle)) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`stream ended before ${needle}`);
+        text += decoder.decode(value);
+      }
+    };
+    await until("event: state");
+    stream.push(pubFrame({ ...UPDATE, payload: { machines: [] } }));
+    await until("event: machines");
+    await until('"machines":[]}\n\n');
+    const frame = `event: machines\ndata: ${JSON.stringify({ added: [], removed: [a!.machine_uuid], machines: [] })}`;
+    expect(text).toContain(frame);
+    await reader.cancel();
+    expect((await (await fetch(`${handle.url}/state`)).json()).machines).toEqual([]);
+  });
+
+  it("says so when a following feed starts with no machines", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, { ...CREATED_SSE, machines: [] }));
+    h.api.queue("sse", (init) => sseStream().respond(init));
+    await h.run([...base, "--transport", "sse"]);
+    expect(h.api.calls[0]!.body).toEqual({ transport: "sse" });
+    expect(h.lines).toContain(`created feed ${FEED_ID} (sse) over no machines yet`);
   });
 
   it("logs transport warnings without tokens", async () => {
@@ -362,16 +397,75 @@ describe("scorbit-feed agent cleanup", () => {
   });
 });
 
+describe("scorbit-feed machines", () => {
+  const MACHINES_URL = `${BASE_URL}/api/v2/data-feeds/machines/`;
+
+  it("prints what the key covers as JSON, and exits 0", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue(`GET ${MACHINES_URL}`, json(200, SCOPE_VENUES));
+    expect(await h.run(["machines", "--base-url", BASE_URL])).toBeUndefined();
+    expect(h.exits).toEqual([0]);
+    expect(h.lines).toEqual([JSON.stringify(SCOPE_VENUES, null, 2)]);
+    expect(h.api.calls.map((c) => [c.method, c.url])).toEqual([["GET", MACHINES_URL]]);
+    h.noSecrets();
+  });
+
+  it("escapes control characters in server text", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    const machine = { ...SCOPE_VENUES.machines[0]!, game_name: "Evil\u001b[2J\nX" };
+    h.api.queue(`GET ${MACHINES_URL}`, json(200, { ...SCOPE_VENUES, machines: [machine] }));
+    await h.run(["machines", "--base-url", BASE_URL]);
+    expect(h.lines[0]).toContain('"game_name": "Evil\\u001b[2J\\nX"');
+    // eslint-disable-next-line no-control-regex
+    expect(h.lines[0]).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
+  });
+
+  it("prints usage for --help", async () => {
+    const h = harness();
+    await h.run(["machines", "--help"]);
+    expect(h.exits).toEqual([0]);
+    expect(h.lines).toEqual([USAGE]);
+  });
+
+  it.each([
+    [{}, [], /set SCORBIT_API_KEY to list its machines/],
+    [{ SCORBIT_API_KEY: API_KEY }, ["--machines", MACHINE_A], /Unknown option '--machines'/],
+    [{ SCORBIT_API_KEY: API_KEY }, ["extra"], /Unexpected argument/],
+  ])("exits 2 on a usage error (%j %j)", async (env, argv, message) => {
+    const h = harness(env);
+    await h.run(["machines", ...argv]);
+    expect(h.exits).toEqual([2]);
+    expect(h.lines[0]).toMatch(message);
+    expect(h.api.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["a refusal", json(403, ERRORS.suspended), /Scorbit API answered 403: Data-feed access/],
+    ["a feed token", undefined, /listMachines needs an sb_live_ API key/],
+  ])("exits 1 on %s, without the credential", async (_label, answer, message) => {
+    const h = harness({ SCORBIT_API_KEY: answer ? API_KEY : FEED_TOKEN });
+    if (answer) h.api.queue(`GET ${MACHINES_URL}`, answer);
+    await h.run(["machines", "--base-url", BASE_URL]);
+    expect(h.exits).toEqual([1]);
+    expect(h.lines[0]).toMatch(message);
+    h.noSecrets();
+  });
+});
+
 describe("scorbit-feed agent (attach mode)", () => {
   it("attaches with the env feed token, and on SIGTERM never deletes the feed", async () => {
     const h = harness({ SCORBIT_FEED_TOKEN: FEED_TOKEN });
     h.api.queue("heartbeat", json(200, heartbeatSse(2)));
     const stream = sseStream();
     h.api.queue("sse", (init) => stream.respond(init));
-    await h.run([...base, "--feed-id", FEED_ID, "--endpoint", SSE_ENDPOINT, "--transport", "sse"]);
+    await h.run([...base, "--feed-id", FEED_ID, "--transport", "sse"]);
     await flush();
     expect(h.lines[0]).toBe(`attaching to feed ${FEED_ID}`);
-    expect(h.api.calls.map((c) => c.key)).toEqual(["heartbeat", "sse"]);
+    // The first heartbeat supplies the endpoint.
+    expect(h.api.calls.map((c) => [c.key, c.url])).toEqual([
+      ["heartbeat", `${BASE_URL}/api/v2/data-feeds/${FEED_ID}/heartbeat/`],
+      ["sse", SSE_ENDPOINT],
+    ]);
 
     h.signals.emit("SIGTERM");
     expect(await h.exited).toBe(0);
@@ -388,16 +482,20 @@ describe("scorbit-feed agent (attach mode)", () => {
     expect(typeof WebSocket).toBe("function");
   });
 
-  it("refuses a bad --endpoint or a plain-http --base-url before any request", async () => {
+  it("no longer takes --endpoint: every heartbeat carries it", async () => {
     const a = harness({ SCORBIT_FEED_TOKEN: FEED_TOKEN });
-    await a.run([...base, "--feed-id", FEED_ID, "--endpoint", "ftp://x.test/"]);
-    expect(a.exits).toEqual([1]);
-    expect(a.lines[0]).toMatch(/endpoint must use https:/);
+    await a.run([...base, "--feed-id", FEED_ID, "--endpoint", SSE_ENDPOINT]);
+    expect(a.exits).toEqual([2]);
+    expect(a.lines[0]).toMatch(/Unknown option '--endpoint'/);
+    expect(a.api.calls).toHaveLength(0);
+  });
+
+  it("refuses a plain-http --base-url before any request", async () => {
     const b = harness({ SCORBIT_API_KEY: API_KEY });
     await b.run(["--port", "0", "--base-url", "http://api.test.invalid"]);
     expect(b.exits).toEqual([1]);
     expect(b.lines[0]).toMatch(/baseUrl must use https:/);
-    expect([...a.api.calls, ...b.api.calls]).toHaveLength(0);
+    expect(b.api.calls).toHaveLength(0);
   });
 });
 
@@ -437,7 +535,7 @@ describe("scorbit-feed signals and log hygiene", () => {
 
   it("shuts down, without deleting an attached feed, on a signal while the server starts", async () => {
     const h = harness({ SCORBIT_FEED_TOKEN: FEED_TOKEN });
-    const running = h.run([...base, "--feed-id", FEED_ID, "--endpoint", SSE_ENDPOINT]);
+    const running = h.run([...base, "--feed-id", FEED_ID]);
     h.signals.emit("SIGINT");
     expect(await running).toBeUndefined();
     expect(h.exits).toEqual([0]);

@@ -52,6 +52,17 @@ export class FeedHttpError extends FeedError {
   }
 }
 
+/**
+ * A create without `machines` whose key covers more machines than one feed
+ * carries (a `400`). Pass `machines` with a subset; `listMachines` lists them.
+ */
+export class FeedScopeTooLargeError extends FeedHttpError {
+  constructor(detail: string | undefined) {
+    super(400, detail);
+    this.name = "FeedScopeTooLargeError";
+  }
+}
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** Parse a URL and require one of `protocols`; plain-text schemes only for loopback hosts. */
@@ -206,4 +217,71 @@ export async function request<T>(
     );
   }
   return parsed as T;
+}
+
+// Local pacing after a failure. These are not feed timers: every feed timer
+// (the refresh interval, the token lifetime) comes from the server. The cap
+// sits far below any token lifetime, so an outage gets many attempts first.
+const RETRY_BASE_MS = 1_000;
+export const RETRY_MAX_MS = 30_000;
+
+/** Capped exponential backoff for the `attempt`th retry (1-based). */
+export const backoff = (attempt: number) =>
+  Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+
+/**
+ * Backoff with jitter: somewhere in the upper half of {@link backoff}, so many
+ * clients failing together (a server outage) do not all retry in step.
+ */
+export const jittered = (attempt: number) => backoff(attempt) * (1 - Math.random() / 2);
+
+/** Attempts a create or delete makes before a retryable answer is surfaced. */
+export const MAX_ATTEMPTS = 4;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `call`, retrying while `retryable` says so, at most {@link MAX_ATTEMPTS}
+ * times, with jittered backoff and never sooner than a `Retry-After`. A wait
+ * longer than {@link RETRY_MAX_MS} is not made: the error is surfaced instead.
+ */
+export async function withRetry<T>(
+  call: () => Promise<T>,
+  retryable: (err: FeedHttpError) => boolean,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (err) {
+      if (!(err instanceof FeedHttpError) || attempt >= MAX_ATTEMPTS || !retryable(err)) {
+        throw err;
+      }
+      const delay = Math.max(jittered(attempt), (err.retryAfter ?? 0) * 1000);
+      if (delay > RETRY_MAX_MS) throw err;
+      await sleep(delay);
+    }
+  }
+}
+
+/**
+ * DELETE a feed with either credential. 204 and 404 both mean it is gone. A
+ * 503 (the feed store is unreachable, nothing deleted) is retried; so is a 409
+ * (the record was rewritten on every attempt), once, as the API asks.
+ */
+export async function deleteFeedRequest(
+  fetchImpl: FetchLike,
+  baseUrl: string,
+  feedId: string,
+  credential: string,
+): Promise<void> {
+  let conflicts = 0;
+  try {
+    await withRetry(
+      () => request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", credential),
+      (err) => err.status === 503 || (err.status === 409 && conflicts++ === 0),
+    );
+  } catch (err) {
+    // Already gone is the outcome a delete wants.
+    if (!(err instanceof FeedHttpError && err.status === 404)) throw err;
+  }
 }

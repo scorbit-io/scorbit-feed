@@ -153,7 +153,7 @@ describe("sse transport: streaming", () => {
     expect(updates).toEqual([UPDATE]);
   });
 
-  it("takes the endpoint from the heartbeat when present, else keeps the last known one", async () => {
+  it("reopens on the endpoint each heartbeat names", async () => {
     const moved = "https://moved.test.invalid/connection/uni_sse";
     const { api, feed } = setup();
     queueStream(api);
@@ -169,6 +169,29 @@ describe("sse transport: streaming", () => {
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
     const urls = api.calls.filter((c) => c.key === "sse").map((c) => c.url);
     expect(urls).toEqual([SSE_ENDPOINT, SSE_ENDPOINT, moved]);
+  });
+
+  it("never reopens on the create response's endpoint when a heartbeat omits it", async () => {
+    const { api, feed, errors } = setup();
+    queueStream(api);
+    queueStream(api);
+    api.queue(
+      "heartbeat",
+      json(200, { ...heartbeatSse(2), sse_endpoint: undefined }),
+      json(200, heartbeatSse(3)),
+    );
+    feed.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(errors.map((e) => e.message)).toEqual([
+      "malformed heartbeat response: bad sse_endpoint",
+    ]);
+    // Still the one stream from create: the endpoint it held was not reused.
+    expect(api.count("sse")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.calls.filter((c) => c.key === "sse").map((c) => c.body)).toEqual([
+      { token: CREATED_SSE.connection_token },
+      { token: jwt("sseconn3") },
+    ]);
   });
 
   it("switches transport when the server's tokens say so", async () => {
@@ -187,7 +210,7 @@ describe("sse transport: streaming", () => {
   });
 });
 
-describe("live machine set (venue-scoped feeds, pending server support)", () => {
+describe("live machine set (feeds that follow their venues)", () => {
   const [A, B] = UPDATE.payload.machines as [FeedMachineState, FeedMachineState];
   const withMachines = (...machines: FeedMachineState[]) => ({
     ...UPDATE,
@@ -239,8 +262,25 @@ describe("live machine set (venue-scoped feeds, pending server support)", () => 
     expect(feed.status).not.toBe("ended");
   });
 
+  it("starts empty when created over venues with no machines, and fills as they join", async () => {
+    const { api, feed, updates } = setup({ initialTokens: { ...CREATED_SSE, machines: [] } });
+    const changes: FeedMachinesChange[] = [];
+    feed.on("machines", (change) => changes.push(change));
+    const stream = queueStream(api);
+    expect(feed.machines).toEqual([]);
+    feed.start();
+    await flush();
+    // An empty publication is valid: the feed carries nothing yet, and nothing changed.
+    stream.push(pubFrame(withMachines()));
+    await flush();
+    stream.push(pubFrame(withMachines(A)));
+    await flush();
+    expect(updates.map((u) => u.payload.machines.length)).toEqual([0, 1]);
+    expect(changes).toEqual([{ added: [A.machine_uuid], removed: [], machines: [A.machine_uuid] }]);
+  });
+
   it("learns the set from the first update when attaching without a create response", async () => {
-    const { api, feed } = setup({ initialTokens: heartbeatSse(1), endpoint: SSE_ENDPOINT });
+    const { api, feed } = setup({ initialTokens: heartbeatSse(1) });
     const changes: FeedMachinesChange[] = [];
     feed.on("machines", (change) => changes.push(change));
     const stream = queueStream(api);

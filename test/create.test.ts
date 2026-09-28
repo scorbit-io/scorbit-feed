@@ -106,7 +106,7 @@ describe("createFeed", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  it("sends no machines field when machines is omitted: the key's whole scope (pending server support)", async () => {
+  it("sends no machines field when machines is omitted: the key's whole scope", async () => {
     const api = fakeApi();
     api.queue("create", json(201, CREATED_SDK));
     await createFeed({ apiKey: API_KEY, baseUrl: BASE_URL, fetch: api.fetch });
