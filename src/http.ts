@@ -40,8 +40,10 @@ export class FeedHttpError extends FeedError {
   readonly detail: string | undefined;
   /** Seconds from a `Retry-After` header, when the answer carried a usable one. */
   readonly retryAfter: number | undefined;
+  /** The API's error code (`errors[0].code`), when the body carried one. */
+  readonly code: string | undefined;
 
-  constructor(status: number, detail: string | undefined, retryAfter?: number) {
+  constructor(status: number, detail: string | undefined, retryAfter?: number, code?: string) {
     // The server's text is untrusted: never let it carry a credential into a log.
     const safe = detail === undefined ? undefined : redact(detail);
     super(`Scorbit API answered ${status}${safe ? `: ${safe}` : ""}`);
@@ -49,6 +51,7 @@ export class FeedHttpError extends FeedError {
     this.status = status;
     this.detail = safe;
     this.retryAfter = retryAfter;
+    this.code = code === undefined ? undefined : redact(code);
   }
 }
 
@@ -57,8 +60,8 @@ export class FeedHttpError extends FeedError {
  * carries (a `400`). Pass `machines` with a subset; `listMachines` lists them.
  */
 export class FeedScopeTooLargeError extends FeedHttpError {
-  constructor(detail: string | undefined) {
-    super(400, detail);
+  constructor(detail: string | undefined, code?: string) {
+    super(400, detail, undefined, code);
     this.name = "FeedScopeTooLargeError";
   }
 }
@@ -114,16 +117,39 @@ export function feedUrl(baseUrl: string, feedId?: string, action?: string): stri
   return url;
 }
 
-function detailOf(body: unknown): string | undefined {
-  // DRF answers `{"detail": "..."}`, or a bare list for a non-field ValidationError.
-  if (Array.isArray(body) && body.every((item) => typeof item === "string")) {
-    return body.join(" ");
+interface ErrorBody {
+  detail?: string;
+  code?: string;
+}
+
+/**
+ * An error body's text and code. The API answers a raised error in the
+ * standardized shape `{message, type, errors: [{code, detail, attr}]}`, and a
+ * few answers it writes itself as `{"detail": "..."}`; a bare list of strings is
+ * plain DRF's non-field ValidationError.
+ */
+function errorOf(body: unknown): ErrorBody {
+  if (Array.isArray(body)) {
+    return body.every((item) => typeof item === "string") ? { detail: body.join(" ") } : {};
   }
-  if (body && typeof body === "object" && "detail" in body) {
-    const detail = (body as { detail: unknown }).detail;
-    if (typeof detail === "string") return detail;
+  if (!body || typeof body !== "object") return {};
+  const b = body as Record<string, unknown>;
+  if (Array.isArray(b.errors)) {
+    const errors = b.errors.filter(
+      (e): e is Record<string, unknown> => !!e && typeof e === "object",
+    );
+    const details = errors.map((e) => e.detail).filter((d) => typeof d === "string");
+    const code = errors[0]?.code;
+    return {
+      detail: details.length
+        ? details.join(" ")
+        : typeof b.message === "string"
+          ? b.message
+          : undefined,
+      code: typeof code === "string" ? code : undefined,
+    };
   }
-  return undefined;
+  return typeof b.detail === "string" ? { detail: b.detail } : {};
 }
 
 /**
@@ -176,6 +202,7 @@ export async function request<T>(
   method: string,
   credential: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${credential}`,
@@ -190,6 +217,7 @@ export async function request<T>(
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: NO_REDIRECT,
+      ...(signal ? { signal } : {}),
     });
     const refused = refusedRedirect(response);
     if (refused) {
@@ -210,10 +238,12 @@ export async function request<T>(
     }
   }
   if (!response.ok) {
+    const { detail, code } = errorOf(parsed);
     throw new FeedHttpError(
       response.status,
-      detailOf(parsed),
+      detail,
       retryAfterOf(response.headers.get("Retry-After")),
+      code,
     );
   }
   return parsed as T;
@@ -230,26 +260,48 @@ export const backoff = (attempt: number) =>
   Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
 
 /**
- * Backoff with jitter: somewhere in the upper half of {@link backoff}, so many
- * clients failing together (a server outage) do not all retry in step.
+ * A wait with jitter: somewhere in its upper half, so many clients failing
+ * together (a server outage) do not all retry in step.
  */
-export const jittered = (attempt: number) => backoff(attempt) * (1 - Math.random() / 2);
+export const jitter = (ms: number) => ms * (1 - Math.random() / 2);
+
+/** {@link backoff} with {@link jitter}. */
+export const jittered = (attempt: number) => jitter(backoff(attempt));
 
 /** Attempts a create or delete makes before a retryable answer is surfaced. */
 export const MAX_ATTEMPTS = 4;
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const aborted = () => new FeedError("aborted");
+
+/** Wait `ms`, or reject as soon as `signal` aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(aborted());
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(aborted());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * Run `call`, retrying while `retryable` says so, at most {@link MAX_ATTEMPTS}
  * times, with jittered backoff and never sooner than a `Retry-After`. A wait
  * longer than {@link RETRY_MAX_MS} is not made: the error is surfaced instead.
+ * `signal` stops it before an attempt or during a wait, never mid-request.
  */
 export async function withRetry<T>(
   call: () => Promise<T>,
   retryable: (err: FeedHttpError) => boolean,
+  signal?: AbortSignal,
 ): Promise<T> {
   for (let attempt = 1; ; attempt++) {
+    if (signal?.aborted) throw aborted();
     try {
       return await call();
     } catch (err) {
@@ -258,27 +310,32 @@ export async function withRetry<T>(
       }
       const delay = Math.max(jittered(attempt), (err.retryAfter ?? 0) * 1000);
       if (delay > RETRY_MAX_MS) throw err;
-      await sleep(delay);
+      await sleep(delay, signal);
     }
   }
 }
 
 /**
  * DELETE a feed with either credential. 204 and 404 both mean it is gone. A
- * 503 (the feed store is unreachable, nothing deleted) is retried; so is a 409
- * (the record was rewritten on every attempt), once, as the API asks.
+ * 503 (the feed store is unreachable, nothing deleted) is retried, and so is a
+ * 429 whose `Retry-After` fits the cap; a 409 (the record was rewritten on every
+ * attempt) is retried once, as the API asks. Deleting is idempotent, so
+ * `signal` also aborts a request in flight.
  */
 export async function deleteFeedRequest(
   fetchImpl: FetchLike,
   baseUrl: string,
   feedId: string,
   credential: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   let conflicts = 0;
   try {
     await withRetry(
-      () => request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", credential),
-      (err) => err.status === 503 || (err.status === 409 && conflicts++ === 0),
+      () => request(fetchImpl, feedUrl(baseUrl, feedId), "DELETE", credential, undefined, signal),
+      (err) =>
+        err.status === 503 || err.status === 429 || (err.status === 409 && conflicts++ === 0),
+      signal,
     );
   } catch (err) {
     // Already gone is the outcome a delete wants.

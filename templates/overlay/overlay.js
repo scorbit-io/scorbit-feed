@@ -114,7 +114,10 @@
     card.replaceChildren(title, state, list);
   }
 
-  function render(machines) {
+  // `updated_at` stays null until the agent has received a publication: until
+  // then an empty list means "not heard yet", not "no machines".
+  function render(state) {
+    var machines = state.machines || [];
     var seen = new Set();
     machines.forEach(function (machine) {
       var uuid = machine.machine_uuid;
@@ -135,7 +138,7 @@
       card.remove();
       tiles.delete(uuid);
     });
-    emptyEl.hidden = machines.length > 0;
+    emptyEl.hidden = machines.length > 0 || state.updated_at == null;
   }
 
   // EventSource reconnects by itself if the agent restarts.
@@ -145,7 +148,7 @@
       setStatus(JSON.parse(event.data).status);
     });
     source.addEventListener("state", function (event) {
-      render(JSON.parse(event.data).machines || []);
+      render(JSON.parse(event.data));
     });
     source.onerror = function () {
       setStatus("reconnecting");

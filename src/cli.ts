@@ -49,7 +49,10 @@ export interface SignalSource {
 
 export interface CliDeps {
   env: Record<string, string | undefined>;
+  /** Diagnostics (stderr). */
   log: (line: string) => void;
+  /** A command's output (stdout): written as is, one call per result. */
+  out: (text: string) => void;
   exit: (code: number) => void;
   signals: SignalSource;
   fetch?: FetchLike;
@@ -152,7 +155,7 @@ async function machinesCommand(argv: string[], deps: CliDeps): Promise<void> {
       fetch: deps.fetch,
     });
     // JSON escapes control characters, so server text cannot reach the terminal raw.
-    log(JSON.stringify(scope, null, 2));
+    deps.out(JSON.stringify(scope, null, 2));
     deps.exit(0);
   } catch (err) {
     log(`error: ${messageOf(err)}`);
@@ -194,10 +197,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   // Every exit goes through finish(): once only, whoever calls first decides
   // the exit code, and it exits only after the feed is stopped (and deleted,
   // if this agent created it) and the server is closed.
+  // A first signal stops the create's retries; one during cleanup abandons the delete.
+  const creating = new AbortController();
+  const deleting = new AbortController();
   let cleaned: Promise<void> | undefined;
   const cleanup = (): Promise<void> =>
     (cleaned ??=
-      feed?.stop({ deleteFeed: created }).catch((err: unknown) => {
+      feed?.stop({ deleteFeed: created, signal: deleting.signal }).catch((err: unknown) => {
         log(`could not delete feed: ${messageOf(err)}`);
       }) ?? Promise.resolve());
   let finishing: Promise<void> | undefined;
@@ -224,7 +230,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   let ready = false;
   let stopRequested = false;
   const onSignal = () => {
+    if (finishStarted && created && !deleting.signal.aborted) {
+      log("exiting without waiting for the delete; the feed may linger until its TTL");
+      deleting.abort();
+      return;
+    }
     stopRequested = true;
+    creating.abort();
     if (ready) void finish(0, stopLine());
   };
   deps.signals.on("SIGINT", onSignal);
@@ -253,6 +265,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
         transport: options.transport,
         baseUrl: options["base-url"],
         fetch: deps.fetch,
+        signal: creating.signal,
       });
       feed = opened.feed;
       // Set at once: anything that fails from here on must delete the feed.
@@ -261,7 +274,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
       log(`created feed ${clean(feed.feedId)} (${opened.created.transport}) over ${clean(names)}`);
     }
   } catch (err) {
-    await finish(err instanceof UsageError ? 2 : 1, `error: ${messageOf(err)}`);
+    // A signal stopped the create while it waited to retry: nothing was created.
+    if (stopRequested) await finish(0, stopLine());
+    else await finish(err instanceof UsageError ? 2 : 1, `error: ${messageOf(err)}`);
     return undefined;
   }
   if (stopRequested) {

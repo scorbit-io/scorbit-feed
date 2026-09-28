@@ -85,6 +85,23 @@ describe("listMachines", () => {
     expect(String(error)).not.toContain(API_KEY);
   });
 
+  it("passes its signal to the request", async () => {
+    const api = fakeApi();
+    const controller = new AbortController();
+    api.queue(`GET ${MACHINES_URL}`, (init) => {
+      expect(init?.signal).toBe(controller.signal);
+      return json(200, SCOPE_VENUES);
+    });
+    await expect(
+      listMachines({
+        apiKey: API_KEY,
+        baseUrl: BASE_URL,
+        fetch: api.fetch,
+        signal: controller.signal,
+      }),
+    ).resolves.toEqual(SCOPE_VENUES);
+  });
+
   it("refuses a malformed answer, naming the field", async () => {
     const api = fakeApi();
     api.queue(`GET ${MACHINES_URL}`, json(200, { ...SCOPE_VENUES, scope_type: "all" }));
@@ -119,7 +136,7 @@ describe("scopeProblem (discovery bodies)", () => {
 });
 
 describe("createFeed over a scoped key", () => {
-  it("names a scope too large for one feed with its own error type", async () => {
+  it("turns the API's over-cap 400 into FeedScopeTooLargeError, with the server's text", async () => {
     const api = fakeApi();
     api.queue("create", json(400, ERRORS.scopeTooLarge));
     const error = await createFeed({ apiKey: API_KEY, baseUrl: BASE_URL, fetch: api.fetch }).catch(
@@ -127,14 +144,44 @@ describe("createFeed over a scoped key", () => {
     );
     expect(error).toBeInstanceOf(FeedScopeTooLargeError);
     expect(error).toBeInstanceOf(FeedHttpError);
-    expect(error).toMatchObject({ status: 400, detail: ERRORS.scopeTooLarge[0] });
+    expect(error).toMatchObject({
+      status: 400,
+      code: "invalid",
+      detail:
+        "This key covers 73 machines and a feed carries at most 50. Pass `machines` with a subset.",
+    });
+    expect(String(error)).toContain("Pass `machines` with a subset.");
     expect(api.count("create")).toBe(1);
+  });
+
+  it("prefers a specific code, whatever the text", async () => {
+    const api = fakeApi();
+    api.queue(
+      "create",
+      json(400, {
+        message: "Too many machines.",
+        type: "validation_error",
+        errors: [{ code: "scope_too_large", detail: "Too many machines.", attr: null }],
+      }),
+    );
+    await expect(
+      createFeed({ apiKey: API_KEY, baseUrl: BASE_URL, fetch: api.fetch }),
+    ).rejects.toBeInstanceOf(FeedScopeTooLargeError);
   });
 
   it.each([
     ["the live-feed cap", ERRORS.feedCap, undefined],
     ["a 400 when machines were listed", ERRORS.scopeTooLarge, [MACHINE_A]],
-    ["a field error", { transport: ['"grpc" is not a valid choice.'] }, undefined],
+    ["a field error", ERRORS.badTransport, undefined],
+    ["a 400 without a body", undefined, undefined],
+    [
+      "a different sentence that mentions machines",
+      {
+        ...ERRORS.feedCap,
+        errors: [{ code: "invalid", detail: "Too many machines.", attr: null }],
+      },
+      undefined,
+    ],
   ])("leaves any other 400 a plain FeedHttpError (%s)", async (_label, body, machines) => {
     const api = fakeApi();
     api.queue("create", json(400, body));
@@ -199,7 +246,11 @@ describe("503 on create: retried with backoff, then surfaced", () => {
     await vi.advanceTimersByTimeAsync(1_000 + 2_000 + 4_000);
     const error = await pending;
     expect(error).toBeInstanceOf(FeedHttpError);
-    expect(error).toMatchObject({ status: 503, detail: ERRORS.switchedOff.detail });
+    expect(error).toMatchObject({
+      status: 503,
+      code: "data_feeds_unavailable",
+      detail: ERRORS.switchedOff.errors[0]!.detail,
+    });
     expect(api.count("create")).toBe(4);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -219,6 +270,91 @@ describe("503 on create: retried with backoff, then surfaced", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await pending).toMatchObject({ status: 503, retryAfter: 120 });
     expect(api.count("create")).toBe(2);
+  });
+
+  it.each([
+    ["a proxy's HTML page", new Response("<html>502 Bad Gateway</html>", { status: 503 })],
+    ["an empty body", json(503)],
+    ["an unrecognised API body", json(503, { detail: "Service unavailable." })],
+    ["another server error code", json(503, { ...ERRORS.storeUnavailable })],
+  ])(
+    "surfaces any other 503 (%s) at once: the create may have gone through",
+    async (_l, answer) => {
+      const api = fakeApi();
+      api.queue("create", answer);
+      await expect(
+        createFeed({ apiKey: API_KEY, baseUrl: BASE_URL, fetch: api.fetch }),
+      ).rejects.toMatchObject({ status: 503 });
+      expect(api.count("create")).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("stops retrying when its signal aborts during a wait, without another request", async () => {
+    const api = fakeApi();
+    api.queue("create", json(503, ERRORS.switchedOff), json(201, CREATED_SSE));
+    const controller = new AbortController();
+    const pending = createFeed({
+      apiKey: API_KEY,
+      baseUrl: BASE_URL,
+      fetch: api.fetch,
+      signal: controller.signal,
+    }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(500);
+    controller.abort();
+    expect(await pending).toMatchObject({ name: "FeedError", message: "aborted" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.count("create")).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("never abandons a create in flight: the answer is returned even if the signal aborted", async () => {
+    const api = fakeApi();
+    const controller = new AbortController();
+    api.queue("create", (init) => {
+      expect(init?.signal).toBeUndefined();
+      controller.abort();
+      return json(201, CREATED_SSE);
+    });
+    await expect(
+      createFeed({
+        apiKey: API_KEY,
+        baseUrl: BASE_URL,
+        fetch: api.fetch,
+        signal: controller.signal,
+      }),
+    ).resolves.toEqual(CREATED_SSE);
+  });
+
+  it("does not wait to retry when the signal aborted while the 503 was in flight", async () => {
+    const api = fakeApi();
+    const controller = new AbortController();
+    api.queue("create", () => {
+      controller.abort();
+      return json(503, ERRORS.switchedOff);
+    });
+    await expect(
+      createFeed({
+        apiKey: API_KEY,
+        baseUrl: BASE_URL,
+        fetch: api.fetch,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("aborted");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sends nothing when the signal has already aborted", async () => {
+    const api = fakeApi();
+    await expect(
+      createFeed({
+        apiKey: API_KEY,
+        baseUrl: BASE_URL,
+        fetch: api.fetch,
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toThrow("aborted");
+    expect(api.calls).toHaveLength(0);
   });
 
   it("does not retry a network failure, which may have created the feed", async () => {
@@ -254,6 +390,7 @@ describe("DELETE statuses", () => {
     ["409 then 204", [json(409, ERRORS.keptChanging), noContent()]],
     ["409, 503, then 204", [json(409, ERRORS.keptChanging), json(503), noContent()]],
     ["503 then 404", [json(503), json(404, ERRORS.notFound)]],
+    ["429 then 204", [json(429, ERRORS.throttled), noContent()]],
   ])("resolves on %s", async (_label, answers) => {
     const api = fakeApi();
     api.queue("delete", ...answers);
@@ -278,6 +415,44 @@ describe("DELETE statuses", () => {
     expect(api.count("delete")).toBe(answers.length);
     api.queue("delete", noContent());
     await expect(feed.stop()).resolves.toBeUndefined();
+  });
+
+  it("waits out a 429's Retry-After, and surfaces one that asks for longer than the cap", async () => {
+    const api = fakeApi();
+    const soon = json(429, ERRORS.throttled);
+    soon.headers.set("Retry-After", "10");
+    const later = json(429, ERRORS.throttled);
+    later.headers.set("Retry-After", "31");
+    api.queue("delete", soon, later);
+    const stopped = attach(api)
+      .stop()
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(api.count("delete")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await stopped).toMatchObject({ status: 429, code: "throttled", retryAfter: 31 });
+    expect(api.count("delete")).toBe(2);
+  });
+
+  it("abandons the delete when stop()'s signal aborts, in flight or waiting", async () => {
+    const api = fakeApi();
+    api.queue("delete", json(503, ERRORS.deleteUnavailable));
+    const controller = new AbortController();
+    const feed = attach(api);
+    const stopped = feed.stop({ signal: controller.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort();
+    expect(await stopped).toMatchObject({ message: "aborted" });
+    expect(api.count("delete")).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The signal also reaches the request itself.
+    const again = new AbortController();
+    api.queue("delete", (init) => {
+      expect(init?.signal).toBe(again.signal);
+      return noContent();
+    });
+    await expect(feed.stop({ signal: again.signal })).resolves.toBeUndefined();
   });
 
   it("retries the API-key delete of an unusable create the same way", async () => {

@@ -12,8 +12,17 @@
  * ("fossil") for sdk; create adds feed_token. The heartbeat serializer
  * declares no delta or machines, so those are absent from heartbeats.
  *
- * Error bodies: an APIException answers `{"detail": "..."}`; a view's
- * non-field ValidationError answers a bare list of strings.
+ * Error bodies: the API's exception handler (drf-standardized-errors, with a
+ * formatter that adds `message`) answers every RAISED error as
+ * `{message, type, errors: [{code, detail, attr}]}`. `type` is
+ * validation_error for a ValidationError, client_error for any other 4xx and
+ * server_error for a 5xx; `code` is the exception's code (`invalid` for a
+ * view's plain ValidationError, `permission_denied`, `not_found`,
+ * `authentication_failed`, `throttled`, or a custom exception's default_code);
+ * `attr` is the field for a field error and null otherwise; `message` is the
+ * first error's detail. Only the bodies a view writes itself are
+ * `{"detail": "..."}`: the create 503 for uncountable feeds, and the delete
+ * 503 and 409.
  *
  * Every credential here is an obviously fake placeholder.
  */
@@ -112,32 +121,81 @@ export const SCOPE_MACHINES: MachineScope = {
   machines: [{ uuid: MACHINE_A, game_name: "Monster Bash", venue: VENUE }],
 };
 
-/** Error bodies, as the views word them. */
+/** A raised error, as the API's exception handler renders it. */
+const raised = (
+  type: "validation_error" | "client_error" | "server_error",
+  code: string,
+  detail: string,
+  attr: string | null = null,
+) => ({ message: detail, type, errors: [{ code, detail, attr }] });
+
+/** Error bodies, exactly as each server path produces them. */
 export const ERRORS = {
-  /** 400: a create without `machines` over a scope larger than one feed. */
-  scopeTooLarge: [
+  /** 400: a create without `machines` over a scope larger than one feed (ValidationError). */
+  scopeTooLarge: raised(
+    "validation_error",
+    "invalid",
     "This key covers 73 machines and a feed carries at most 50. Pass `machines` with a subset.",
-  ],
-  /** 400: the account's live-feed cap. */
-  feedCap: ["You may have at most 2 live data feeds."],
+  ),
+  /** 400: the account's live-feed cap (ValidationError). */
+  feedCap: raised("validation_error", "invalid", "You may have at most 2 live data feeds."),
+  /** 400: a field error from the request serializer. */
+  badTransport: raised(
+    "validation_error",
+    "invalid_choice",
+    '"grpc" is not a valid choice.',
+    "transport",
+  ),
   /** 403: a machine outside the key's scope, or not the account's (never says which). */
-  machinesUnavailable: { detail: "One or more machines are not available to this account." },
-  /** 503 on create: the platform switch is off (or unreadable). */
-  switchedOff: { detail: "Data feeds are temporarily unavailable. Try again later." },
-  /** 503 on create: live feeds cannot be counted against the cap. */
+  machinesUnavailable: raised(
+    "client_error",
+    "permission_denied",
+    "One or more machines are not available to this account.",
+  ),
+  /** 403 on create, discovery or heartbeat: the account's data-feed access is suspended. */
+  suspended: raised(
+    "client_error",
+    "permission_denied",
+    "Data-feed access for this account is suspended.",
+  ),
+  /** 503 on create: the platform switch is off or unreadable (DataFeedsSwitchedOff). */
+  switchedOff: raised(
+    "server_error",
+    "data_feeds_unavailable",
+    "Data feeds are temporarily unavailable. Try again later.",
+  ),
+  /** 503 on create: live feeds cannot be counted against the cap (written by the view). */
   uncountable: { detail: "Your live feeds cannot be counted right now. Try again shortly." },
-  /** 503 on heartbeat or delete: the feed token cannot be checked (store outage). */
-  storeUnavailable: { detail: "The feed store is unavailable. Try again shortly." },
-  /** 503 on delete: nothing was deleted. */
+  /** 503 on heartbeat or delete: the feed token cannot be checked (FeedStoreUnavailable). */
+  storeUnavailable: raised(
+    "server_error",
+    "feed_store_unavailable",
+    "The feed store is unavailable. Try again shortly.",
+  ),
+  /** 503 on delete: nothing was deleted (written by the view). */
   deleteUnavailable: { detail: "The feed could not be deleted right now. Try again shortly." },
-  /** 409 on delete: the record was rewritten on every attempt. */
+  /** 409 on delete: the record was rewritten on every attempt (written by the view). */
   keptChanging: { detail: "The feed kept changing while it was being deleted. Try again." },
   /** 403 on heartbeat: the feed ended because data feeds were switched off. */
-  feedsSwitchedOff: { detail: "Data feeds have been turned off by Scorbit; this feed has ended." },
-  /** 403 on heartbeat: authorization withdrawn (key revoked, account suspended, machine lost). */
-  withdrawn: { detail: "Authorization for this feed has been withdrawn." },
-  /** 403 on create, discovery or heartbeat: the account's data-feed access is suspended. */
-  suspended: { detail: "Data-feed access for this account is suspended." },
-  notFound: { detail: "Feed not found." },
-  badFeedToken: { detail: "Invalid feed token." },
+  feedsSwitchedOff: raised(
+    "client_error",
+    "permission_denied",
+    "Data feeds have been turned off by Scorbit; this feed has ended.",
+  ),
+  /** 403 on heartbeat: authorization withdrawn (key revoked, machine lost). */
+  withdrawn: raised(
+    "client_error",
+    "permission_denied",
+    "Authorization for this feed has been withdrawn.",
+  ),
+  /** 404: an unknown or expired feed, or a key that did not create it. */
+  notFound: raised("client_error", "not_found", "Feed not found."),
+  /** 401: a feed token that does not match its feed. */
+  badFeedToken: raised("client_error", "authentication_failed", "Invalid feed token."),
+  /** 429: a throttle; the answer also carries `Retry-After`. */
+  throttled: raised(
+    "client_error",
+    "throttled",
+    "Request was throttled. Expected available in 1 second.",
+  ),
 };

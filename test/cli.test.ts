@@ -46,6 +46,7 @@ afterEach(async () => {
 function harness(env: Record<string, string | undefined> = {}, extra: Partial<CliDeps> = {}) {
   const api = fakeApi();
   const lines: string[] = [];
+  const output: string[] = [];
   const exits: number[] = [];
   const signals = new EventEmitter();
   let resolveExit!: (code: number) => void;
@@ -53,6 +54,7 @@ function harness(env: Record<string, string | undefined> = {}, extra: Partial<Cl
   const deps: CliDeps = {
     env,
     log: (line) => lines.push(line),
+    out: (text) => output.push(text),
     exit: (code) => {
       exits.push(code);
       resolveExit(code);
@@ -70,7 +72,7 @@ function harness(env: Record<string, string | undefined> = {}, extra: Partial<Cl
     const text = lines.join("\n");
     for (const secret of SECRETS) expect(text).not.toContain(secret);
   };
-  return { api, lines, exits, signals, exited, run, noSecrets };
+  return { api, lines, output, exits, signals, exited, run, noSecrets };
 }
 
 const base = ["--port", "0", "--base-url", BASE_URL];
@@ -135,10 +137,7 @@ describe("scorbit-feed argument handling", () => {
 
   it("exits 1 when the API refuses the create", async () => {
     const h = harness({ SCORBIT_API_KEY: API_KEY });
-    h.api.queue(
-      "create",
-      json(403, { detail: "One or more machines are not available to this account." }),
-    );
+    h.api.queue("create", json(403, ERRORS.machinesUnavailable));
     await h.run([...base, "--machines", MACHINE_A]);
     expect(h.exits).toEqual([1]);
     expect(h.lines[0]).toMatch(/403: One or more machines/);
@@ -216,7 +215,7 @@ describe("scorbit-feed agent (create mode)", () => {
 
   it("exits 1 when the server ends the feed", async () => {
     const { h, stream } = await running();
-    h.api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    h.api.queue("heartbeat", json(404, ERRORS.notFound));
     stream.push(DISCONNECT_FRAME);
     await flush();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -400,12 +399,14 @@ describe("scorbit-feed agent cleanup", () => {
 describe("scorbit-feed machines", () => {
   const MACHINES_URL = `${BASE_URL}/api/v2/data-feeds/machines/`;
 
-  it("prints what the key covers as JSON, and exits 0", async () => {
+  it("writes what the key covers to stdout as plain JSON, and exits 0", async () => {
     const h = harness({ SCORBIT_API_KEY: API_KEY });
     h.api.queue(`GET ${MACHINES_URL}`, json(200, SCOPE_VENUES));
     expect(await h.run(["machines", "--base-url", BASE_URL])).toBeUndefined();
     expect(h.exits).toEqual([0]);
-    expect(h.lines).toEqual([JSON.stringify(SCOPE_VENUES, null, 2)]);
+    expect(h.output).toEqual([JSON.stringify(SCOPE_VENUES, null, 2)]);
+    expect(JSON.parse(h.output[0]!)).toEqual(SCOPE_VENUES);
+    expect(h.lines).toEqual([]);
     expect(h.api.calls.map((c) => [c.method, c.url])).toEqual([["GET", MACHINES_URL]]);
     h.noSecrets();
   });
@@ -415,9 +416,18 @@ describe("scorbit-feed machines", () => {
     const machine = { ...SCOPE_VENUES.machines[0]!, game_name: "Evil\u001b[2J\nX" };
     h.api.queue(`GET ${MACHINES_URL}`, json(200, { ...SCOPE_VENUES, machines: [machine] }));
     await h.run(["machines", "--base-url", BASE_URL]);
-    expect(h.lines[0]).toContain('"game_name": "Evil\\u001b[2J\\nX"');
+    expect(h.output[0]).toContain('"game_name": "Evil\\u001b[2J\\nX"');
     // eslint-disable-next-line no-control-regex
-    expect(h.lines[0]).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
+    expect(h.output[0]).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
+  });
+
+  it("prints server text as it is, even text shaped like a token", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    const name = "Pinball.Wizard2000.Deluxe-Ed";
+    const machine = { ...SCOPE_VENUES.machines[0]!, game_name: name };
+    h.api.queue(`GET ${MACHINES_URL}`, json(200, { ...SCOPE_VENUES, machines: [machine] }));
+    await h.run(["machines", "--base-url", BASE_URL]);
+    expect(JSON.parse(h.output[0]!).machines[0].game_name).toBe(name);
   });
 
   it("prints usage for --help", async () => {
@@ -436,6 +446,7 @@ describe("scorbit-feed machines", () => {
     await h.run(["machines", ...argv]);
     expect(h.exits).toEqual([2]);
     expect(h.lines[0]).toMatch(message);
+    expect(h.output).toEqual([]);
     expect(h.api.calls).toHaveLength(0);
   });
 
@@ -517,6 +528,44 @@ describe("scorbit-feed signals and log hygiene", () => {
     expect(h.api.count("sse")).toBe(0);
     expect(h.lines.some((l) => l.startsWith("serving on"))).toBe(false);
     h.noSecrets();
+  });
+
+  it("stops retrying the create on a signal, and exits without a feed to delete", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const h = harness({ SCORBIT_API_KEY: API_KEY });
+      h.api.queue("create", json(503, ERRORS.switchedOff), json(201, CREATED_SSE));
+      const running = h.run([...base, "--transport", "sse"]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(h.api.count("create")).toBe(1);
+      h.signals.emit("SIGINT");
+      expect(await running).toBeUndefined();
+      expect(h.exits).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.api.count("create")).toBe(1);
+      expect(h.api.count("delete")).toBe(0);
+      expect(h.lines).toEqual(["stopping"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exits on a second signal while the delete is being retried, saying the feed may linger", async () => {
+    const h = harness({ SCORBIT_API_KEY: API_KEY });
+    h.api.queue("create", json(201, CREATED_SSE));
+    h.api.queue("sse", (init) => sseStream().respond(init));
+    await h.run([...base, "--transport", "sse"]);
+    h.api.queue("delete", json(503, ERRORS.deleteUnavailable), json(503), json(503), json(503));
+    h.signals.emit("SIGTERM");
+    await flush();
+    expect(h.api.count("delete")).toBe(1);
+    h.signals.emit("SIGINT");
+    expect(await h.exited).toBe(0);
+    expect(h.api.count("delete")).toBe(1);
+    expect(h.lines).toContain(
+      "exiting without waiting for the delete; the feed may linger until its TTL",
+    );
+    expect(h.lines).toContain("could not delete feed: aborted");
   });
 
   it("logs, and still exits, when that delete fails", async () => {
@@ -613,7 +662,7 @@ describe("scorbit-feed shutdown races", () => {
 
   it("a signal after the server ended the feed keeps exit code 1, and exits once", async () => {
     const { h, stream } = await serving();
-    h.api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    h.api.queue("heartbeat", json(404, ERRORS.notFound));
     stream.push(DISCONNECT_FRAME);
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     h.signals.emit("SIGINT");

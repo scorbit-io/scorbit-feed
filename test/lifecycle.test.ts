@@ -10,6 +10,7 @@ import {
   API_KEY,
   BASE_URL,
   CREATED_SSE,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   MACHINE_A,
@@ -49,10 +50,13 @@ function queueStream(api: ReturnType<typeof fakeApi>) {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // No jitter: each wait is the top of its range (jitter has its own tests).
+  vi.spyOn(Math, "random").mockReturnValue(0);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -183,7 +187,7 @@ describe("feed error listeners and stability", () => {
     stream.push(CONNECT_FRAME);
     await vi.advanceTimersByTimeAsync(10_000);
     stream.push(`data: ${JSON.stringify({ push: { disconnect: { code: 3005 } } })}\n\n`);
-    await flush();
+    await vi.advanceTimersByTimeAsync(0);
     // Thirty seconds live in total: refreshed at once, no backoff.
     expect(api.count("heartbeat")).toBe(1);
   });
@@ -251,7 +255,7 @@ describe("review fixes", () => {
   it("does not try to delete a feed the server already ended", async () => {
     const { api, feed, ended } = setup();
     queueStream(api);
-    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    api.queue("heartbeat", json(404, ERRORS.notFound));
     feed.start();
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
     expect(ended).toEqual(["ended"]);
@@ -264,7 +268,7 @@ describe("Retry-After", () => {
   it("waits at least as long as a 429 asks", async () => {
     const { api, feed, errors } = setup();
     queueStream(api);
-    const throttled = json(429, { detail: "Request was throttled." });
+    const throttled = json(429, ERRORS.throttled);
     throttled.headers.set("Retry-After", "10");
     api.queue("heartbeat", throttled, json(200, heartbeatSse(2)));
     queueStream(api);

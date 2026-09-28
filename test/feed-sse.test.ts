@@ -13,6 +13,7 @@ import {
   BASE_URL,
   CREATED_SDK,
   CREATED_SSE,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   SSE_ENDPOINT,
@@ -61,11 +62,14 @@ function queueStream(api: ReturnType<typeof fakeApi>, status = 200) {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // No jitter: each wait is the top of its range (jitter has its own tests).
+  vi.spyOn(Math, "random").mockReturnValue(0);
   FakeCentrifuge.instances = [];
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("sse transport: streaming", () => {
@@ -352,12 +356,52 @@ describe("sse transport: disconnects and failures", () => {
     first.push(CONNECT_FRAME);
     await vi.advanceTimersByTimeAsync(30_000);
     first.push(DISCONNECT_FRAME + pubFrame(UPDATE));
-    await flush();
+    // At once, give or take the spread (none here: Math.random is pinned to 0).
+    await vi.advanceTimersByTimeAsync(0);
     expect(first.aborted).toBe(true);
     expect(api.count("heartbeat")).toBe(1);
     expect(statuses).toEqual(["connecting", "live", "reconnecting"]);
     const reopened = api.calls.filter((c) => c.key === "sse")[1]!;
     expect(reopened.body).toEqual({ token: jwt("sseconn2") });
+  });
+
+  it("spreads the refresh after a stable session's drop over up to a second", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { api, feed } = setup();
+    const first = queueStream(api);
+    queueStream(api);
+    api.queue("heartbeat", json(200, heartbeatSse(2)));
+    feed.start();
+    await flush();
+    first.push(CONNECT_FRAME);
+    await vi.advanceTimersByTimeAsync(30_000);
+    first.push(DISCONNECT_FRAME);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(api.count("heartbeat")).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.count("heartbeat")).toBe(1);
+  });
+
+  it("jitters the reconnect backoff and the no-reconnect wait", async () => {
+    // 0.5 puts each wait at three quarters of its top: 1s becomes 750ms, 30s 22.5s.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { api, feed } = setup();
+    const streams = Array.from({ length: 3 }, () => queueStream(api));
+    api.queue("heartbeat", ...[2, 3].map((n) => json(200, heartbeatSse(n))));
+    feed.start();
+    await flush();
+    streams[0]!.push(CONNECT_FRAME + DISCONNECT_FRAME);
+    await vi.advanceTimersByTimeAsync(749);
+    expect(api.count("heartbeat")).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.count("heartbeat")).toBe(1);
+    streams[1]!.push(
+      CONNECT_FRAME + `data: ${JSON.stringify({ push: { disconnect: { code: 3503 } } })}\n\n`,
+    );
+    await vi.advanceTimersByTimeAsync(22_499);
+    expect(api.count("heartbeat")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.count("heartbeat")).toBe(2);
   });
 
   it("cannot refresh faster than the backoff when disconnects come right after connecting", async () => {
@@ -392,7 +436,7 @@ describe("sse transport: disconnects and failures", () => {
     streams[1]!.push(CONNECT_FRAME);
     await vi.advanceTimersByTimeAsync(30_000);
     streams[1]!.push(DISCONNECT_FRAME);
-    await flush();
+    await vi.advanceTimersByTimeAsync(0);
     expect(api.count("heartbeat")).toBe(2);
     // The next quick drop starts the backoff from the bottom again.
     streams[2]!.push(CONNECT_FRAME + DISCONNECT_FRAME);
@@ -436,10 +480,7 @@ describe("sse transport: disconnects and failures", () => {
   it("ends as withdrawn when the refresh after a disconnect answers 403", async () => {
     const { api, feed, ended } = setup();
     const stream = queueStream(api);
-    api.queue(
-      "heartbeat",
-      json(403, { detail: "Authorization for this feed has been withdrawn." }),
-    );
+    api.queue("heartbeat", json(403, ERRORS.withdrawn));
     feed.start();
     await flush();
     stream.push(DISCONNECT_FRAME);

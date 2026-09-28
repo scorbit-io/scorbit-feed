@@ -28,6 +28,12 @@ export interface KeyOptions {
    * browser. Set this only for a trusted runtime that happens to define them.
    */
   dangerouslyAllowBrowser?: boolean;
+  /**
+   * Stops the call. `listMachines` aborts its request; `createFeed` stops
+   * before its next attempt or during a wait between them, but never abandons
+   * a create in flight, whose answer says whether a feed now exists.
+   */
+  signal?: AbortSignal;
 }
 
 export interface CreateOptions extends KeyOptions {
@@ -39,6 +45,24 @@ export interface CreateOptions extends KeyOptions {
   machines?: string[];
   transport?: Transport;
 }
+
+// The API's own create 503s, and only those, mean nothing was written: data
+// feeds switched off (a raised error with this code), or live feeds that
+// cannot be counted (a body the view writes itself). A 503 from anything in
+// front of the API may follow a create that went through, so it is not retried.
+const SWITCHED_OFF_CODE = "data_feeds_unavailable";
+const UNCOUNTABLE_DETAIL = "Your live feeds cannot be counted right now. Try again shortly.";
+const refusedBeforeWrite = (err: FeedHttpError) =>
+  err.status === 503 && (err.code === SWITCHED_OFF_CODE || err.detail === UNCOUNTABLE_DETAIL);
+
+// The over-cap 400 carries only the generic `invalid` code, so its sentence is
+// matched too; a specific code, if the API adds one, is matched first.
+const SCOPE_TOO_LARGE_CODE = "scope_too_large";
+const SCOPE_TOO_LARGE =
+  /^This key covers \d+ machines and a feed carries at most \d+\. Pass `machines` with a subset\.$/;
+const scopeTooLarge = (err: FeedHttpError) =>
+  err.status === 400 &&
+  (err.code === SCOPE_TOO_LARGE_CODE || SCOPE_TOO_LARGE.test(err.detail ?? ""));
 
 // A page, a worker, or anything that looks like one.
 const inBrowser = () =>
@@ -76,16 +100,23 @@ export async function listMachines(options: KeyOptions): Promise<MachineScope> {
   checkKeyOptions("listMachines", options);
   const { fetchImpl, baseUrl } = resolve(options);
   const url = feedUrl(baseUrl, undefined, "machines");
-  const scope = await request<unknown>(fetchImpl, url, "GET", options.apiKey);
+  const scope = await request<unknown>(
+    fetchImpl,
+    url,
+    "GET",
+    options.apiKey,
+    undefined,
+    options.signal,
+  );
   const problem = scopeProblem(scope);
   if (problem) throw new FeedError(`malformed machines response: bad ${problem}`);
   return scope as MachineScope;
 }
 
 /**
- * Create a feed with the `sb_live_` API key. Server-side only. A `503` (data
- * feeds switched off, or the feed store unreadable; nothing was created) is
- * retried a few times with backoff before it is thrown.
+ * Create a feed with the `sb_live_` API key. Server-side only. The API's own
+ * `503` (data feeds switched off, or live feeds uncountable; nothing was
+ * created) is retried a few times with backoff before it is thrown.
  */
 export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
   checkKeyOptions("createFeed", options);
@@ -102,16 +133,13 @@ export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
   try {
     created = await withRetry(
       () => request<unknown>(fetchImpl, feedUrl(baseUrl), "POST", options.apiKey, body),
-      (err) => err.status === 503,
+      refusedBeforeWrite,
+      options.signal,
     );
   } catch (err) {
-    // The one 400 that names `machines` when none were sent: the scope is too large for one feed.
-    const tooLarge =
-      err instanceof FeedHttpError &&
-      err.status === 400 &&
-      !machines &&
-      /\bmachines\b/.test(err.detail ?? "");
-    throw tooLarge ? new FeedScopeTooLargeError(err.detail) : err;
+    // Only a create without `machines` can be refused for covering too much.
+    const tooLarge = err instanceof FeedHttpError && !machines && scopeTooLarge(err);
+    throw tooLarge ? new FeedScopeTooLargeError(err.detail, err.code) : err;
   }
   const problem = createdProblem(created);
   if (problem) {

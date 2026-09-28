@@ -8,6 +8,7 @@ import {
   BASE_URL,
   CREATED_SDK,
   CREATED_SSE,
+  ERRORS,
   FEED_TOKEN,
   MACHINE_A,
   MACHINE_B,
@@ -115,10 +116,7 @@ describe("createFeed", () => {
 
   it("surfaces an API refusal as an error without the key in it", async () => {
     const api = fakeApi();
-    api.queue(
-      "create",
-      json(403, { detail: "One or more machines are not available to this account." }),
-    );
+    api.queue("create", json(403, ERRORS.machinesUnavailable));
     const error = await createFeed({
       apiKey: API_KEY,
       machines: [MACHINE_A],

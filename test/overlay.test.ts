@@ -248,7 +248,8 @@ async function tilePage() {
     scores: [{ position: 1, player: null, score, modes: [], is_nfc_verified: false }],
   });
   return {
-    send: (list: unknown[]) => state({ data: JSON.stringify({ machines: list }) }),
+    send: (list: unknown[], updatedAt: string | null = "2026-09-28T12:00:00Z") =>
+      state({ data: JSON.stringify({ status: "live", updated_at: updatedAt, machines: list }) }),
     machine,
     tiles: () => machines.children.map((card) => card.dataset.machine),
     tile: (uuid: string) => machines.children.find((card) => card.dataset.machine === uuid)!,
@@ -286,7 +287,13 @@ describe("overlay tiles", () => {
     expect(page.empty.hidden).toBe(false);
   });
 
-  it("ships the empty state hidden, so it is not shown while connecting", () => {
+  it("shows no empty state before the first publication, only once one says there are none", async () => {
+    const page = await tilePage();
+    // The agent's state before any publication: no machines, updated_at null.
+    page.send([], null);
+    expect(page.empty.hidden).toBe(true);
+    page.send([]);
+    expect(page.empty.hidden).toBe(false);
     expect(HTML).toMatch(/<p id="empty" class="empty" hidden>/);
   });
 });

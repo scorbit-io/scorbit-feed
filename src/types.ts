@@ -8,7 +8,7 @@ export interface FeedMachineRef {
 }
 
 /**
- * The heartbeat response (`DataFeedTokensSerializer`): refreshed tokens and
+ * The heartbeat response: refreshed tokens and
  * timers, and the stream they are for. Every heartbeat names the feed's
  * transport, channel and that transport's endpoint.
  */
@@ -31,7 +31,7 @@ export interface FeedTokens {
   heartbeat_interval: number;
 }
 
-/** The create and PATCH response (`DataFeedSerializer`). */
+/** The create and PATCH response. */
 export interface FeedInfo extends FeedTokens {
   /**
    * The machines at create. On a feed that follows its key's venues this is
@@ -42,7 +42,7 @@ export interface FeedInfo extends FeedTokens {
   delta?: string;
 }
 
-/** The create response (`DataFeedCreatedSerializer`). `feed_token` is shown once. */
+/** The create response. `feed_token` is shown once. */
 export interface CreatedFeed extends FeedInfo {
   feed_token: string;
 }
@@ -50,14 +50,14 @@ export interface CreatedFeed extends FeedInfo {
 /** What an API key is scoped to, fixed when the key was generated. */
 export type ScopeType = "venues" | "machines";
 
-/** One machine an API key covers (`APIKeyScopeMachineSerializer`). */
+/** One machine an API key covers, with its venue. */
 export interface ScopeMachine {
   uuid: string;
   game_name: string;
   venue: { uuid: string; name: string };
 }
 
-/** The discovery response (`DataFeedScopeSerializer`): what the key covers now. */
+/** The discovery response: what the key covers now. */
 export interface MachineScope {
   scope_type: ScopeType;
   machines: ScopeMachine[];

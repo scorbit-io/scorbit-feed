@@ -11,6 +11,7 @@ import type { FeedUpdate } from "../src/types.js";
 import {
   BASE_URL,
   CREATED_SDK,
+  ERRORS,
   FEED_ID,
   FEED_TOKEN,
   WS_ENDPOINT,
@@ -184,7 +185,7 @@ describe("sdk transport with the real centrifuge client", () => {
   it("stops the SDK for good when the refresh finds the feed gone", async () => {
     const { api, feed } = setup();
     server.connectErrors = [109];
-    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    api.queue("heartbeat", json(404, ERRORS.notFound));
     const ended: string[] = [];
     feed.on("ended", ({ reason }) => ended.push(reason));
     feed.start();

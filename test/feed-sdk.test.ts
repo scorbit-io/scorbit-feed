@@ -53,6 +53,8 @@ function setup(extra: Partial<AttachOptions> = {}) {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // No jitter: each wait is the top of its range (jitter has its own tests).
+  vi.spyOn(Math, "random").mockReturnValue(0);
   FakeCentrifuge.instances = [];
 });
 
@@ -271,7 +273,7 @@ describe("sdk transport: token refresh", () => {
 
   it("tells the SDK to give up (UnauthorizedError) once the feed has ended", async () => {
     const { api, feed, ended } = setup();
-    api.queue("heartbeat", json(404, { detail: "Feed not found." }));
+    api.queue("heartbeat", json(404, ERRORS.notFound));
     feed.start();
     await expect(FakeCentrifuge.last.options.getToken()).rejects.toBeInstanceOf(UnauthorizedError);
     expect(ended).toEqual(["ended"]);
@@ -288,7 +290,7 @@ describe("sdk transport: token refresh", () => {
 
   it("makes the SDK retry (plain error) when a refresh fails transiently", async () => {
     const { api, feed, errors } = setup();
-    api.queue("heartbeat", json(503, { detail: "unavailable" }));
+    api.queue("heartbeat", json(503, ERRORS.storeUnavailable));
     feed.start();
     const error = await FakeCentrifuge.last.options.getToken().catch((e) => e);
     expect(error).toBeInstanceOf(FeedError);
@@ -315,7 +317,7 @@ describe("sdk transport: token refresh", () => {
       "heartbeat",
       json(503),
       new TypeError(`fetch failed for ${FEED_TOKEN}`),
-      json(429, { detail: "Request was throttled." }),
+      json(429, ERRORS.throttled),
       json(200, heartbeatSdk(2)),
       json(200, heartbeatSdk(3)),
     );
@@ -442,10 +444,7 @@ describe("sdk transport: disconnects", () => {
 
   it("treats a server-side unsubscribe like a disconnect, and ignores a local one", async () => {
     const { api, feed } = setup();
-    api.queue(
-      "heartbeat",
-      json(403, { detail: "Authorization for this feed has been withdrawn." }),
-    );
+    api.queue("heartbeat", json(403, ERRORS.withdrawn));
     feed.start();
     FakeCentrifuge.last.sub.emit("unsubscribed", { code: 0, reason: "unsubscribe called" });
     await flush();
@@ -655,7 +654,7 @@ describe("sdk transport: stop", () => {
 
   it("deletes once, treats an already-deleted feed as success, and surfaces other failures", async () => {
     const a = setup();
-    a.api.queue("delete", json(404, { detail: "Feed not found." }));
+    a.api.queue("delete", json(404, ERRORS.notFound));
     await expect(a.feed.stop()).resolves.toBeUndefined();
     await a.feed.stop();
     expect(a.api.count("delete")).toBe(1);

@@ -8,7 +8,7 @@ import {
   type FetchLike,
   RETRY_MAX_MS,
   TIMER_MAX_MS,
-  backoff,
+  jitter,
   checkBaseUrl,
   checkEndpoint,
   deleteFeedRequest,
@@ -35,6 +35,9 @@ import type {
 // A connection must stay live this long before a drop counts as a fresh
 // failure (refresh at once) rather than part of a reconnect storm (back off).
 const STABLE_MS = 30_000;
+// Spreads the refresh after a stable session's drop, so feeds that one server
+// restart dropped together do not all refresh in the same instant.
+const STABLE_REFRESH_SPREAD_MS = 1_000;
 
 const TERMINAL: Partial<Record<number, EndReason>> = {
   401: "unauthorized",
@@ -84,6 +87,8 @@ export interface FeedEvents {
 export interface StopOptions {
   /** DELETE the feed on the server as well as disconnecting. Default true. */
   deleteFeed?: boolean;
+  /** Abandons the DELETE, its retries included; the feed then lives on until its TTL. */
+  signal?: AbortSignal;
 }
 
 /** A live attachment to one data feed. Create it with {@link attachFeed}. */
@@ -175,18 +180,18 @@ export class Feed extends Emitter<FeedEvents> {
    * on a bad endpoint), and it still deletes the feed then. After the server
    * ended it (`withdrawn`, `ended`, `unauthorized`) there is nothing to delete.
    */
-  async stop({ deleteFeed = true }: StopOptions = {}): Promise<void> {
+  async stop({ deleteFeed = true, signal }: StopOptions = {}): Promise<void> {
     this.end("stopped");
     if (!deleteFeed || this.endReason !== "stopped") return;
-    this.deletion ??= this.deleteOnServer().catch((err: unknown) => {
+    this.deletion ??= this.deleteOnServer(signal).catch((err: unknown) => {
       this.deletion = undefined; // a failed delete may be retried
       throw err;
     });
     return this.deletion;
   }
 
-  private deleteOnServer(): Promise<void> {
-    return deleteFeedRequest(this.fetchImpl, this.baseUrl, this.feedId, this.feedToken);
+  private deleteOnServer(signal: AbortSignal | undefined): Promise<void> {
+    return deleteFeedRequest(this.fetchImpl, this.baseUrl, this.feedId, this.feedToken, signal);
   }
 
   // A throwing listener must not break the lifecycle: report it, redacted, as an error event.
@@ -269,12 +274,12 @@ export class Feed extends Emitter<FeedEvents> {
     if (!reconnectable(code)) {
       // The server said not to reconnect: back off hard, and let the heartbeat settle whether the feed is over.
       this.dropAttempts += 1;
-      this.schedule(RETRY_MAX_MS);
+      this.schedule(jitter(RETRY_MAX_MS));
     } else if (stable) {
-      void this.refresh();
+      this.schedule(Math.random() * STABLE_REFRESH_SPREAD_MS);
     } else {
       this.dropAttempts += 1;
-      this.schedule(backoff(this.dropAttempts));
+      this.schedule(jittered(this.dropAttempts));
     }
   }
 

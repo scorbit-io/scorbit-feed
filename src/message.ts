@@ -63,9 +63,9 @@ export function parsePublication(
 ): { update: FeedUpdate } | { problem: string } | undefined {
   if (!isObject(data) || data.type !== "data_feed_update") return undefined;
   if (!isObject(data.metadata)) return { problem: "metadata" };
-  // MessageMetadataSerializer: created_at and updated_at are required
-  // DateTimeFields; game, machine, variant and venue are optional UUIDFields
-  // and sequence an optional IntegerField, none with a default.
+  // Message metadata: created_at and updated_at are always sent (date-times);
+  // game, machine, variant and venue (uuids) and sequence (an integer) only
+  // when set.
   for (const field of ["created_at", "updated_at"] as const) {
     if (!isString(data.metadata[field])) return { problem: `metadata.${field}` };
   }
