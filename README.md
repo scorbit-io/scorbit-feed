@@ -165,7 +165,7 @@ Events:
   connection). Messages never contain a credential.
 
 What the library throws is a `FeedError`; an answer from the API is a
-`FeedHttpError` with its `status`, and a scope too large for one feed a
+`FeedHttpError` with its `status`, the API's `detail` text and error `code`, and a scope too large for one feed a
 `FeedScopeTooLargeError`.
 
 `baseUrl` defaults to `https://api.scorbit.io`.
@@ -193,8 +193,9 @@ Both carry the same messages.
   never on a compiled-in number, and the tokens it returns last `token_ttl`
   seconds.
 - **Disconnects.** When Centrifugo closes a connection that had been live for a
-  while, the library refreshes the tokens and reconnects at once. A connection
-  that drops soon after connecting backs off exponentially instead, so a server
+  while, the library refreshes the tokens and reconnects within a second (spread
+  at random, so feeds dropped together do not refresh together). A connection
+  that drops soon after connecting backs off exponentially, with jitter, instead, so a server
   that keeps disconnecting cannot cause a refresh storm; the backoff resets only
   after a sustained live session. Codes Centrifugo marks as "do not reconnect"
   (3500–3999, 4500–4999) back off to the maximum, and the next heartbeat settles
@@ -215,24 +216,30 @@ Retries use a capped exponential backoff with jitter (1 s doubling to 30 s, each
 wait somewhere in the upper half of that), well inside the token lifetime, and
 never sooner than a `Retry-After` header asks. A heartbeat retry leaves the
 connection's status alone. A create or a delete makes at most four attempts, and
-surfaces the answer at once rather than wait longer than 30 s.
+surfaces the answer at once rather than wait longer than 30 s. Pass `signal` (an
+`AbortSignal`) to `createFeed` or `listMachines`, or to `feed.stop()`, to give up
+early: a create stops between attempts but never abandons one in flight, whose
+answer says whether the feed exists; a delete stops at once, and the feed then
+lives on until the server drops it.
 
-| Call      | Answer                   | What the library does                                                                                     |
-| --------- | ------------------------ | --------------------------------------------------------------------------------------------------------- |
-| create    | `201`                    | Returns the feed                                                                                          |
-| create    | `400`                    | Throws; `FeedScopeTooLargeError` when no `machines` were sent and the scope is too large for one feed     |
-| create    | `403`                    | Throws: a machine outside the key's scope or not the account's (never says which), or a suspended account |
-| create    | `503`                    | Retried: data feeds are switched off, or the feed store cannot be read. Nothing was created               |
-| heartbeat | `200`                    | New tokens and endpoint; the next refresh on the reply's `heartbeat_interval`                             |
-| heartbeat | `401`                    | Ends the feed: `unauthorized`                                                                             |
-| heartbeat | `403`                    | Ends the feed: `withdrawn` (authorization withdrawn, account suspended, or data feeds switched off)       |
-| heartbeat | `404`                    | Ends the feed: `ended`                                                                                    |
-| heartbeat | `503`, other 5xx, `429`  | Retried, never terminal; a `503` is a feed-store outage                                                   |
-| heartbeat | network error, bad reply | Retried                                                                                                   |
-| delete    | `204`, `404`             | Done: deleted, or already gone                                                                            |
-| delete    | `503`                    | Retried: the feed store is unreachable and nothing was deleted                                            |
-| delete    | `409`                    | Retried once: the record was rewritten on every attempt, which the API asks the client to retry           |
-| delete    | anything else            | `stop()` rejects; calling it again tries again                                                            |
+| Call      | Answer                   | What the library does                                                                                                           |
+| --------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| create    | `201`                    | Returns the feed                                                                                                                |
+| create    | `400`                    | Throws; `FeedScopeTooLargeError` when no `machines` were sent and the scope is too large for one feed                           |
+| create    | `403`                    | Throws: a machine outside the key's scope or not the account's (never says which), or a suspended account                       |
+| create    | the API's own `503`      | Retried: data feeds are switched off, or live feeds cannot be counted. Nothing was created                                      |
+| create    | anything else            | Throws, not retried: `429`, other 5xx (a proxy's `503` included) or a network error, after which the feed may have been created |
+| heartbeat | `200`                    | New tokens and endpoint; the next refresh on the reply's `heartbeat_interval`                                                   |
+| heartbeat | `401`                    | Ends the feed: `unauthorized`                                                                                                   |
+| heartbeat | `403`                    | Ends the feed: `withdrawn` (authorization withdrawn, account suspended, or data feeds switched off)                             |
+| heartbeat | `404`                    | Ends the feed: `ended`                                                                                                          |
+| heartbeat | `503`, other 5xx, `429`  | Retried, never terminal; a `503` is a feed-store outage                                                                         |
+| heartbeat | network error, bad reply | Retried                                                                                                                         |
+| delete    | `204`, `404`             | Done: deleted, or already gone                                                                                                  |
+| delete    | `503`                    | Retried: the feed store is unreachable and nothing was deleted                                                                  |
+| delete    | `429`                    | Retried, when its `Retry-After` is at most 30 s                                                                                 |
+| delete    | `409`                    | Retried once: the record was rewritten on every attempt, which the API asks the client to retry                                 |
+| delete    | anything else            | `stop()` rejects; calling it again tries again                                                                                  |
 
 The end reasons:
 
@@ -254,7 +261,7 @@ Nothing is emitted, and no request or timer runs, after a feed has ended.
 ## The agent: `scorbit-feed`
 
 ```sh
-# List what the key covers (uuid, game name, venue), as JSON.
+# List what the key covers (uuid, game name, venue), as JSON on stdout.
 SCORBIT_API_KEY=sb_live_... npx scorbit-feed machines
 
 # Create a feed; the agent deletes it again when it exits.

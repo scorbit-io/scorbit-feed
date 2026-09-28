@@ -15,17 +15,19 @@ All notable changes to this project are documented here. The format follows
   and `sse` (Centrifugo uni_sse read with `fetch`, the connect command sent in a
   POST body so the token stays out of URLs).
 - Token refresh on the server-provided interval; after a Centrifugo disconnect,
-  an immediate refresh following a stable session and backoff otherwise (hard
-  backoff for no-reconnect codes); jittered, capped backoff for transient
-  failures, honouring `Retry-After`; and terminal `ended` reasons (`withdrawn`,
-  `ended`, `unauthorized`, `stopped`).
-- Every heartbeat names its transport, channel and endpoint, and the endpoint is
-  taken from each heartbeat and nothing else once connected: `attachFeed` needs
-  no `endpoint`, and the agent no `--endpoint`.
-- A `503` is retried, never terminal: on create (data feeds switched off, or the
-  feed store unreadable) and delete a bounded number of times, and on heartbeat
-  (a feed-store outage) for as long as the feed runs. A delete's `409` is retried
-  once. README documents every status per call.
+  a refresh within a second following a stable session and backoff otherwise
+  (hard backoff for no-reconnect codes); jittered, capped backoff for transient
+  failures and reconnects, honouring `Retry-After`; and terminal `ended` reasons
+  (`withdrawn`, `ended`, `unauthorized`, `stopped`).
+- The Centrifugo endpoint comes from each heartbeat, which names its transport,
+  channel and endpoint.
+- A `503` is retried, never terminal: the API's own create `503` (data feeds
+  switched off, or live feeds uncountable) and a delete's `503` a bounded number
+  of times, and a heartbeat's (a feed-store outage) for as long as the feed runs.
+  A delete's `409` is retried once, and its `429` when `Retry-After` allows. An
+  `AbortSignal` stops a create's or a delete's retries. Errors read the API's
+  standardized error bodies, `code` included. README documents every status per
+  call.
 - A throwing event listener cannot break the feed's lifecycle.
 - Scoped API keys: `listMachines` (and `scorbit-feed machines`) lists what a key
   covers, with each machine's venue; `machines` is optional on create and
