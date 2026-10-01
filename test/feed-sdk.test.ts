@@ -442,7 +442,7 @@ describe("sdk transport: disconnects", () => {
     expect(feed.status).toBe("reconnecting");
   });
 
-  it("treats a server-side unsubscribe like a disconnect, and ignores a local one", async () => {
+  it("treats another server unsubscribe code like a disconnect, and ignores a local one", async () => {
     const { api, feed } = setup();
     api.queue("heartbeat", json(403, ERRORS.withdrawn));
     feed.start();
@@ -450,9 +450,71 @@ describe("sdk transport: disconnects", () => {
     await flush();
     expect(api.count("heartbeat")).toBe(0);
     FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2500, reason: "unsubscribed" });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(api.count("heartbeat")).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
     expect(api.count("heartbeat")).toBe(1);
     expect(feed.status).toBe("ended");
+  });
+
+  it.each([
+    ["withdrawn", 403, ERRORS.withdrawn],
+    ["withdrawn", 403, ERRORS.feedsSwitchedOff],
+    ["ended", 404, ERRORS.notFound],
+  ])(
+    "heartbeats at once on a server unsubscribe, and ends as %s on a %i",
+    async (reason, status, body) => {
+      const { api, feed, statuses, ended } = setup();
+      api.queue("heartbeat", json(status, body));
+      feed.start();
+      const client = FakeCentrifuge.last;
+      client.sub.emit("subscribed", {});
+      client.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+      expect(statuses.at(-1)).toBe("reconnecting");
+      expect(client.disconnectCalls).toBe(1);
+      await flush();
+      expect(api.count("heartbeat")).toBe(1);
+      expect(ended).toEqual([reason]);
+      expect(FakeCentrifuge.instances).toHaveLength(1);
+    },
+  );
+
+  it("reopens when the heartbeat after a server unsubscribe succeeds", async () => {
+    const { api, feed } = setup();
+    api.queue("heartbeat", json(200, heartbeatSdk(2)));
+    feed.start();
+    FakeCentrifuge.last.sub.emit("subscribed", {});
+    FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+    await flush();
+    expect(api.count("heartbeat")).toBe(1);
+    expect(FakeCentrifuge.instances).toHaveLength(2);
+    expect(FakeCentrifuge.last.options.token).toBe(jwt("conn2"));
+    FakeCentrifuge.last.sub.emit("subscribed", {});
+    expect(feed.status).toBe("live");
+  });
+
+  it("backs off on a server unsubscribe that recurs before a stable session", async () => {
+    const { api, feed } = setup();
+    api.queue("heartbeat", ...[2, 3, 4].map((n) => json(200, heartbeatSdk(n))));
+    feed.start();
+    const unsubscribe = () => {
+      FakeCentrifuge.last.sub.emit("subscribed", {});
+      FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+    };
+    unsubscribe();
+    await flush();
+    expect(api.count("heartbeat")).toBe(1);
+    unsubscribe();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(api.count("heartbeat")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.count("heartbeat")).toBe(2);
+    // After a stable session the next one asks at once again.
+    FakeCentrifuge.last.sub.emit("subscribed", {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+    await flush();
+    expect(api.count("heartbeat")).toBe(3);
   });
 
   it("merges a disconnect into a refresh already in flight, then reconnects", async () => {

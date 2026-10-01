@@ -42,12 +42,20 @@ export function sseTransport(fetchImpl: FetchLike) {
         channel?: unknown;
         connect?: unknown;
         disconnect?: { code?: unknown };
+        unsubscribe?: unknown;
         pub?: { data?: unknown };
       } | null;
       if (push?.disconnect) {
         close();
         const { code } = push.disconnect;
         hooks.disconnected(typeof code === "number" ? code : undefined);
+        return;
+      }
+      // Only this connection's channel, or the server-side subscription's (no channel), as for pub.
+      if (push?.unsubscribe) {
+        if (push.channel !== undefined && push.channel !== conn.channel) return;
+        close();
+        hooks.unsubscribed();
         return;
       }
       if (push?.connect) hooks.live();

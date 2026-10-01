@@ -14,6 +14,8 @@ export interface TransportHooks {
   reconnecting(): void;
   /** The server closed the connection with a Centrifugo disconnect code. */
   disconnected(code?: number): void;
+  /** The server unsubscribed the connection from the feed's channel, which may mean the feed is over. */
+  unsubscribed(): void;
   /** The connection failed or ended without a disconnect code. */
   lost(error: Error): void;
   error(error: Error): void;

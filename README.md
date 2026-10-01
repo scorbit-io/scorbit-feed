@@ -204,6 +204,12 @@ Both carry the same messages.
   after a sustained live session. Codes Centrifugo marks as "do not reconnect"
   (3500–3999, 4500–4999) back off to the maximum, and the next heartbeat settles
   whether the feed is over.
+- **Server unsubscribes.** When the API ends a feed it unsubscribes the feed's
+  channel. The library leaves `live` for `reconnecting`, closes the connection
+  and heartbeats at once, so the answer ends the feed with its real reason
+  (`withdrawn` or `ended`); a heartbeat that succeeds reopens the stream. Only
+  the first unsubscribe since a sustained live session heartbeats at once; one
+  that keeps recurring backs off like any other drop.
 - **Every heartbeat names its stream**: the transport, the channel and that
   transport's endpoint. Once connected, the library takes the endpoint from each
   heartbeat and from nothing else: a reply without one is malformed and retried,
