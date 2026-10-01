@@ -66,8 +66,8 @@ simply absent. Like `createFeed`, it needs the API key and runs server-side only
 Creating a feed **without** `machines` streams the key's whole scope; passing
 `machines` narrows it to a subset, in your order. An empty `machines` list is
 refused rather than read as "everything". A scope larger than one feed can carry
-is refused with a `FeedScopeTooLargeError` (a `400`): pass `machines` with a
-subset.
+is refused with a `FeedScopeTooLargeError` (a `400`, code `scope_too_large`):
+pass `machines` with a subset.
 
 A feed created without `machines` on a **venue-scoped** key **follows** its
 venues: machines join and leave the running feed as the venues' membership
@@ -113,7 +113,7 @@ feed.on("update", (update) => {
   }
 });
 feed.on("status", (status) => console.log("status:", status));
-feed.on("ended", ({ reason }) => console.log("ended:", reason));
+feed.on("ended", ({ reason, error }) => console.log("ended:", reason, error?.code));
 feed.start();
 
 // Later: disconnect and delete the feed on the server.
@@ -160,13 +160,17 @@ Events:
 - `machines`: `{ added, removed, machines }` (uuids), when the feed's machine set
   changes. Emitted before the `update` that carried the change.
 - `status`: `idle`, `connecting`, `live`, `reconnecting`, `ended`.
-- `ended`: `{ reason }`, see below.
+- `ended`: `{ reason, error }`, see below. `error` is the heartbeat answer that
+  ended the feed (a `FeedHttpError`, `code` included); absent for `stopped`.
 - `error`: a non-fatal problem (a failed refresh that will be retried, a dropped
   connection). Messages never contain a credential.
 
 What the library throws is a `FeedError`; an answer from the API is a
-`FeedHttpError` with its `status`, the API's `detail` text and error `code`, and a scope too large for one feed a
-`FeedScopeTooLargeError`.
+`FeedHttpError` with its `status`, the API's `detail` text and its stable error
+`code` (`errors[0].code`). A scope too large for one feed is a
+`FeedScopeTooLargeError`, and a create at the account's live-feed ceiling a
+`FeedLimitReachedError`. Branch on `code`, never on the text: the API may reword
+its messages, but not its codes.
 
 `baseUrl` defaults to `https://api.scorbit.io`.
 
@@ -222,24 +226,36 @@ early: a create stops between attempts but never abandons one in flight, whose
 answer says whether the feed exists; a delete stops at once, and the feed then
 lives on until the server drops it.
 
-| Call      | Answer                   | What the library does                                                                                                           |
-| --------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| create    | `201`                    | Returns the feed                                                                                                                |
-| create    | `400`                    | Throws; `FeedScopeTooLargeError` when no `machines` were sent and the scope is too large for one feed                           |
-| create    | `403`                    | Throws: a machine outside the key's scope or not the account's (never says which), or a suspended account                       |
-| create    | the API's own `503`      | Retried: data feeds are switched off, or live feeds cannot be counted. Nothing was created                                      |
-| create    | anything else            | Throws, not retried: `429`, other 5xx (a proxy's `503` included) or a network error, after which the feed may have been created |
-| heartbeat | `200`                    | New tokens and endpoint; the next refresh on the reply's `heartbeat_interval`                                                   |
-| heartbeat | `401`                    | Ends the feed: `unauthorized`                                                                                                   |
-| heartbeat | `403`                    | Ends the feed: `withdrawn` (authorization withdrawn, account suspended, or data feeds switched off)                             |
-| heartbeat | `404`                    | Ends the feed: `ended`                                                                                                          |
-| heartbeat | `503`, other 5xx, `429`  | Retried, never terminal; a `503` is a feed-store outage                                                                         |
-| heartbeat | network error, bad reply | Retried                                                                                                                         |
-| delete    | `204`, `404`             | Done: deleted, or already gone                                                                                                  |
-| delete    | `503`                    | Retried: the feed store is unreachable and nothing was deleted                                                                  |
-| delete    | `429`                    | Retried, when its `Retry-After` is at most 30 s                                                                                 |
-| delete    | `409`                    | Retried once: the record was rewritten on every attempt, which the API asks the client to retry                                 |
-| delete    | anything else            | `stop()` rejects; calling it again tries again                                                                                  |
+Decisions follow the status and, where the status alone is ambiguous, the
+error code; never the message.
+
+| Call      | Answer                                                                        | What the library does                                                                                                                              |
+| --------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| create    | `201`                                                                         | Returns the feed                                                                                                                                   |
+| create    | `400` `scope_too_large`                                                       | Throws `FeedScopeTooLargeError` when no `machines` were sent                                                                                       |
+| create    | `400` `feed_limit_reached`                                                    | Throws `FeedLimitReachedError`: end a feed first                                                                                                   |
+| create    | other `400`                                                                   | Throws (a field error keeps its own code)                                                                                                          |
+| create    | `403` `machines_unavailable`, `data_feed_suspended`                           | Throws: a machine outside the key's scope or not the account's (never says which), or a suspended account                                          |
+| create    | `401` `invalid_api_key`                                                       | Throws                                                                                                                                             |
+| create    | `503` `data_feeds_unavailable`, `feeds_uncountable`, `feed_store_unavailable` | Retried: data feeds are switched off, or the feed store could not be read or written; the API says each is safe to repeat                          |
+| create    | anything else                                                                 | Throws, not retried: `429`, other 5xx (a `503` without one of those codes included) or a network error, after which the feed may have been created |
+| heartbeat | `200`                                                                         | New tokens and endpoint; the next refresh on the reply's `heartbeat_interval`                                                                      |
+| heartbeat | `401` `invalid_feed_token`                                                    | Ends the feed: `unauthorized`                                                                                                                      |
+| heartbeat | `403` `feed_withdrawn`, `data_feeds_switched_off`                             | Ends the feed: `withdrawn` (authorization withdrawn, a suspended account included, or data feeds switched off)                                     |
+| heartbeat | `404` `feed_not_found`                                                        | Ends the feed: `ended`                                                                                                                             |
+| heartbeat | `503` `feed_store_unavailable`, other 5xx, `429`                              | Retried, never terminal                                                                                                                            |
+| heartbeat | network error, bad reply                                                      | Retried                                                                                                                                            |
+| delete    | `204`, `404` `feed_not_found`                                                 | Done: deleted, or already gone                                                                                                                     |
+| delete    | `503` `feed_store_unavailable`                                                | Retried: the feed store is unreachable and nothing was deleted                                                                                     |
+| delete    | `429`                                                                         | Retried, when its `Retry-After` is at most 30 s                                                                                                    |
+| delete    | `409` `feed_kept_changing`                                                    | Retried once: the record was rewritten on every attempt, which the API asks the client to retry                                                    |
+| delete    | anything else                                                                 | `stop()` rejects; calling it again tries again                                                                                                     |
+
+A heartbeat ends the feed on its status alone, so a new `401`, `403` or `404`
+code ends it too; the `ended` event's `error.code` says which. Servers older
+than the stable codes sent the uncountable create `503` without a code: for
+them, and only for them, its exact message is still matched and retried, and
+their over-scope `400` is recognised by its message.
 
 The end reasons:
 
