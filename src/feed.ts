@@ -80,7 +80,8 @@ export interface FeedEvents {
   /** Emitted before the `update` that changed the set. */
   machines: FeedMachinesChange;
   status: FeedStatus;
-  ended: { reason: EndReason };
+  /** `error` is the heartbeat answer that ended the feed, `code` included; absent for `stopped`. */
+  ended: { reason: EndReason; error?: FeedHttpError };
   error: Error;
 }
 
@@ -228,7 +229,7 @@ export class Feed extends Emitter<FeedEvents> {
     return this.emitAlive("status", status);
   }
 
-  private end(reason: EndReason): void {
+  private end(reason: EndReason, error?: FeedHttpError): void {
     // Once only; and finished first, so nothing a listener does below can restart any work.
     if (this.finished) return;
     this.finished = true;
@@ -237,7 +238,7 @@ export class Feed extends Emitter<FeedEvents> {
     this.transport?.close();
     this.currentStatus = "ended";
     this.emit("status", "ended");
-    this.emit("ended", { reason });
+    this.emit("ended", error ? { reason, error } : { reason });
     this.silenced = true;
   }
 
@@ -311,7 +312,7 @@ export class Feed extends Emitter<FeedEvents> {
       if (this.finished) return false;
       const reason = err instanceof FeedHttpError ? TERMINAL[err.status] : undefined;
       if (reason) {
-        this.end(reason);
+        this.end(reason, err as FeedHttpError);
         return false;
       }
       const retryAfter = err instanceof FeedHttpError ? (err.retryAfter ?? 0) : 0;

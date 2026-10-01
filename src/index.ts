@@ -8,6 +8,7 @@ export {
   FEED_TOKEN_PREFIX,
   FeedError,
   FeedHttpError,
+  FeedLimitReachedError,
   FeedScopeTooLargeError,
 } from "./http.js";
 export type { FetchLike } from "./http.js";

@@ -27,9 +27,16 @@ export class FeedError extends Error {
 
 /**
  * The one way an error crosses the public boundary: its message redacted, as a
- * FeedError. The original is dropped, since it may carry a credential.
+ * FeedError (an API answer stays a FeedHttpError). The original is dropped,
+ * since it may carry a credential.
  */
 export function redactedError(err: unknown, prefix?: string): FeedError {
+  if (err instanceof FeedHttpError) {
+    // Built from redacted parts already: kept typed, so its `code` still reaches the caller.
+    const copy = new FeedHttpError(err.status, err.detail, err.retryAfter, err.code);
+    if (prefix) copy.message = `${prefix}: ${copy.message}`;
+    return copy;
+  }
   const message = err instanceof Error ? err.message : String(err);
   return new FeedError(redact(prefix ? `${prefix}: ${message}` : message));
 }
@@ -63,6 +70,17 @@ export class FeedScopeTooLargeError extends FeedHttpError {
   constructor(detail: string | undefined, code?: string) {
     super(400, detail, undefined, code);
     this.name = "FeedScopeTooLargeError";
+  }
+}
+
+/**
+ * A create at the account's live-feed ceiling (a `400`, code
+ * `feed_limit_reached`). End a feed, then create again.
+ */
+export class FeedLimitReachedError extends FeedHttpError {
+  constructor(detail: string | undefined, code?: string) {
+    super(400, detail, undefined, code);
+    this.name = "FeedLimitReachedError";
   }
 }
 
@@ -123,10 +141,10 @@ interface ErrorBody {
 }
 
 /**
- * An error body's text and code. The API answers a raised error in the
- * standardized shape `{message, type, errors: [{code, detail, attr}]}`, and a
- * few answers it writes itself as `{"detail": "..."}`; a bare list of strings is
- * plain DRF's non-field ValidationError.
+ * An error body's text and code. The API answers every error in the
+ * standardized shape `{message, type, errors: [{code, detail, attr}]}`. Older
+ * servers wrote a few as a bare `{"detail": "..."}`, and a bare list of strings
+ * is plain DRF's non-field ValidationError: both still parse, without a code.
  */
 function errorOf(body: unknown): ErrorBody {
   if (Array.isArray(body)) {

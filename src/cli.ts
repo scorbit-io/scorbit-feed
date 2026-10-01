@@ -307,7 +307,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<AgentHandle |
   });
   agentFeed.on("error", (err) => log(`warning: ${messageOf(err)}`));
   // Also fires, synchronously, when finish() stops the feed: finish is once-only.
-  agentFeed.on("ended", ({ reason }) => void finish(1, `feed ended: ${reason}`));
+  agentFeed.on("ended", ({ reason, error }) => {
+    const why = [error?.code, error?.detail].filter(Boolean).join(": ");
+    void finish(1, `feed ended: ${reason}${why ? ` (${clean(why)})` : ""}`);
+  });
 
   let address;
   try {

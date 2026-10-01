@@ -146,7 +146,7 @@ describe("createFeed over a scoped key", () => {
     expect(error).toBeInstanceOf(FeedHttpError);
     expect(error).toMatchObject({
       status: 400,
-      code: "invalid",
+      code: "scope_too_large",
       detail:
         "This key covers 73 machines and a feed carries at most 50. Pass `machines` with a subset.",
     });
@@ -170,7 +170,6 @@ describe("createFeed over a scoped key", () => {
   });
 
   it.each([
-    ["the live-feed cap", ERRORS.feedCap, undefined],
     ["a 400 when machines were listed", ERRORS.scopeTooLarge, [MACHINE_A]],
     ["a field error", ERRORS.badTransport, undefined],
     ["a 400 without a body", undefined, undefined],
@@ -191,8 +190,7 @@ describe("createFeed over a scoped key", () => {
       baseUrl: BASE_URL,
       fetch: api.fetch,
     }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(FeedHttpError);
-    expect(error).not.toBeInstanceOf(FeedScopeTooLargeError);
+    expect((error as Error).constructor).toBe(FeedHttpError);
   });
 
   it("accepts a following feed that starts with no machines", async () => {
@@ -222,6 +220,7 @@ describe("503 on create: retried with backoff, then surfaced", () => {
   it.each([
     ["switched off", ERRORS.switchedOff],
     ["feeds uncountable", ERRORS.uncountable],
+    ["the record write failed", ERRORS.createUnavailable],
   ])("retries a 503 (%s) and returns the feed once it is created", async (_label, body) => {
     const api = fakeApi();
     api.queue("create", json(503, body), json(503, body), json(201, CREATED_SSE));
@@ -276,7 +275,13 @@ describe("503 on create: retried with backoff, then surfaced", () => {
     ["a proxy's HTML page", new Response("<html>502 Bad Gateway</html>", { status: 503 })],
     ["an empty body", json(503)],
     ["an unrecognised API body", json(503, { detail: "Service unavailable." })],
-    ["another server error code", json(503, { ...ERRORS.storeUnavailable })],
+    [
+      "an unrecognised code",
+      json(503, {
+        ...ERRORS.switchedOff,
+        errors: [{ code: "maintenance", detail: "Down.", attr: null }],
+      }),
+    ],
   ])(
     "surfaces any other 503 (%s) at once: the create may have gone through",
     async (_l, answer) => {

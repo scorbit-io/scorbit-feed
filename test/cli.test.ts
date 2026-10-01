@@ -220,7 +220,7 @@ describe("scorbit-feed agent (create mode)", () => {
     await flush();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(await h.exited).toBe(1);
-    expect(h.lines).toContain("feed ended: ended");
+    expect(h.lines).toContain("feed ended: ended (feed_not_found: Feed not found.)");
     expect(h.api.count("delete")).toBe(0);
   });
 
