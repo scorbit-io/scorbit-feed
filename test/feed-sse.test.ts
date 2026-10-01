@@ -491,8 +491,10 @@ describe("sse transport: disconnects and failures", () => {
     expect(api.count("sse")).toBe(1);
   });
 
-  const unsubscribeFrame = (channel?: string) =>
-    `data: ${JSON.stringify({ push: { channel, unsubscribe: { code: 2000, reason: "server unsubscribe" } } })}\n\n`;
+  const unsubscribeFrame = (
+    channel?: string,
+    unsubscribe: unknown = { code: 2000, reason: "server unsubscribe" },
+  ) => `data: ${JSON.stringify({ push: { channel, unsubscribe } })}\n\n`;
 
   it.each([
     ["withdrawn", 403, ERRORS.withdrawn, `data_feed:${FEED_ID}`],
@@ -530,6 +532,49 @@ describe("sse transport: disconnects and failures", () => {
     expect(api.count("heartbeat")).toBe(0);
   });
 
+  it.each([
+    ["no code", {}],
+    ["a code below 2500", { code: 2499 }],
+    ["true", true],
+    ["a number", 1],
+  ])("acts on an unsubscribe push with %s", async (_label, unsubscribe) => {
+    const { api, feed, ended } = setup();
+    const stream = queueStream(api);
+    api.queue("heartbeat", json(404, ERRORS.notFound));
+    feed.start();
+    await flush();
+    stream.push(CONNECT_FRAME + unsubscribeFrame(undefined, unsubscribe));
+    await flush();
+    expect(api.count("heartbeat")).toBe(1);
+    expect(ended).toEqual(["ended"]);
+  });
+
+  it.each([2500, 2502])("ignores an unsubscribe push with resubscribe code %i", async (code) => {
+    const { api, feed, updates } = setup();
+    const stream = queueStream(api);
+    feed.start();
+    await flush();
+    stream.push(CONNECT_FRAME + unsubscribeFrame(undefined, { code }) + pubFrame(UPDATE));
+    await flush();
+    expect(feed.status).toBe("live");
+    expect(updates).toHaveLength(1);
+    expect(api.count("heartbeat")).toBe(0);
+  });
+
+  it("ignores an unsubscribe push after stop", async () => {
+    const { api, feed, statuses } = setup();
+    const stream = queueStream(api);
+    feed.start();
+    await flush();
+    feed.on("status", (status) => {
+      if (status === "live") void feed.stop({ deleteFeed: false });
+    });
+    stream.push(CONNECT_FRAME + unsubscribeFrame());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.count("heartbeat")).toBe(0);
+    expect(statuses).toEqual(["connecting", "live", "ended"]);
+  });
+
   it("reopens when the heartbeat after an unsubscribe push succeeds, and backs off if it recurs", async () => {
     const { api, feed } = setup();
     const streams = Array.from({ length: 3 }, () => queueStream(api));
@@ -540,6 +585,8 @@ describe("sse transport: disconnects and failures", () => {
     await flush();
     expect(api.count("heartbeat")).toBe(1);
     expect(api.calls.filter((c) => c.key === "sse")[1]!.body).toEqual({ token: jwt("sseconn2") });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.count("heartbeat")).toBe(1);
     streams[1]!.push(CONNECT_FRAME + unsubscribeFrame());
     await vi.advanceTimersByTimeAsync(1_999);
     expect(api.count("heartbeat")).toBe(1);

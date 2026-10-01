@@ -278,7 +278,9 @@ export class Feed extends Emitter<FeedEvents> {
     this.reopenPending = true;
     if (unsubscribed && this.dropAttempts === 0) {
       this.dropAttempts = 1;
-      void this.refresh();
+      // One in flight may carry tokens issued before the unsubscribe: ask once more after it.
+      if (this.inflight) void this.inflight.then(() => this.refresh());
+      else void this.refresh();
     } else if (!reconnectable(code)) {
       // The server said not to reconnect: back off hard, and let the heartbeat settle whether the feed is over.
       this.dropAttempts += 1;

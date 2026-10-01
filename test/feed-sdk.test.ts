@@ -449,7 +449,7 @@ describe("sdk transport: disconnects", () => {
     FakeCentrifuge.last.sub.emit("unsubscribed", { code: 0, reason: "unsubscribe called" });
     await flush();
     expect(api.count("heartbeat")).toBe(0);
-    FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2500, reason: "unsubscribed" });
+    FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2100, reason: "unsubscribed" });
     await vi.advanceTimersByTimeAsync(29_999);
     expect(api.count("heartbeat")).toBe(0);
     await vi.advanceTimersByTimeAsync(1);
@@ -491,6 +491,41 @@ describe("sdk transport: disconnects", () => {
     expect(FakeCentrifuge.last.options.token).toBe(jwt("conn2"));
     FakeCentrifuge.last.sub.emit("subscribed", {});
     expect(feed.status).toBe("live");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.count("heartbeat")).toBe(1);
+  });
+
+  it("asks once more when a server unsubscribe lands during a heartbeat in flight", async () => {
+    const { api, feed, ended } = setup();
+    const pending = deferred<Response>();
+    api.queue("heartbeat", () => pending.promise, json(403, ERRORS.withdrawn));
+    feed.start();
+    FakeCentrifuge.last.sub.emit("subscribed", {});
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(api.count("heartbeat")).toBe(1);
+    FakeCentrifuge.last.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+    await flush();
+    expect(api.count("heartbeat")).toBe(1);
+    // Tokens issued before the end: they reopen, and the next heartbeat tells the truth.
+    pending.resolve(json(200, heartbeatSdk(2)));
+    await flush();
+    expect(api.count("heartbeat")).toBe(2);
+    expect(ended).toEqual(["withdrawn"]);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(api.count("heartbeat")).toBe(2);
+  });
+
+  it("ignores a server unsubscribe after stop", async () => {
+    const { api, feed, statuses } = setup();
+    feed.start();
+    const client = FakeCentrifuge.last;
+    client.sub.emit("subscribed", {});
+    await feed.stop({ deleteFeed: false });
+    const seen = statuses.length;
+    client.sub.emit("unsubscribed", { code: 2000, reason: "server unsubscribe" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(api.count("heartbeat")).toBe(0);
+    expect(statuses).toHaveLength(seen);
   });
 
   it("backs off on a server unsubscribe that recurs before a stable session", async () => {

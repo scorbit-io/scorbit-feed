@@ -16,12 +16,13 @@ All notable changes to this project are documented here. The format follows
   POST body so the token stays out of URLs).
 - Token refresh on the server-provided interval; after a Centrifugo disconnect,
   a refresh within a second following a stable session and backoff otherwise
-  (hard backoff for no-reconnect codes); after a server unsubscribe of the
-  feed's channel, on either transport, a heartbeat at once (the first since a
-  stable session, backoff after that), so a feed the API ended ends with its
-  reason; jittered, capped backoff for transient
+  (hard backoff for no-reconnect codes); jittered, capped backoff for transient
   failures and reconnects, honouring `Retry-After`; and terminal `ended` reasons
   (`withdrawn`, `ended`, `unauthorized`, `stopped`).
+- A server unsubscribe of the feed's channel, on either transport, ends `live`
+  and heartbeats at once, so a feed the API ended ends with its real reason; a
+  heartbeat already in flight is followed by one more. Only the first since a
+  stable session is immediate: one that recurs backs off like any drop.
 - The Centrifugo endpoint comes from each heartbeat, which names its transport,
   channel and endpoint.
 - A `503` is retried, never terminal: the API's own create `503` (data feeds
