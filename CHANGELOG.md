@@ -29,8 +29,9 @@ All notable changes to this project are documented here. The format follows
   standardized error bodies, `code` included. README documents every status per
   call.
 - Errors are matched by the API's stable error code, never its message: a
-  create `503` is retried for `data_feeds_unavailable`, `feeds_uncountable`
-  and `feed_store_unavailable`; `scope_too_large` throws
+  create `503` is retried for `data_feeds_unavailable` and
+  `feeds_uncountable`, and once for `feed_store_unavailable`, whose write may
+  have landed (a limit reached after it is reported as that store failure); `scope_too_large` throws
   `FeedScopeTooLargeError` and `feed_limit_reached` the new
   `FeedLimitReachedError`. Every `FeedHttpError` carries its `code`, the
   heartbeat's `error` events included, and the `ended` event carries the
