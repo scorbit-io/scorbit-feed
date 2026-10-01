@@ -220,7 +220,6 @@ describe("503 on create: retried with backoff, then surfaced", () => {
   it.each([
     ["switched off", ERRORS.switchedOff],
     ["feeds uncountable", ERRORS.uncountable],
-    ["the record write failed", ERRORS.createUnavailable],
   ])("retries a 503 (%s) and returns the feed once it is created", async (_label, body) => {
     const api = fakeApi();
     api.queue("create", json(503, body), json(503, body), json(201, CREATED_SSE));

@@ -47,15 +47,14 @@ export interface CreateOptions extends KeyOptions {
   transport?: Transport;
 }
 
-// The API's own create 503s, and only those, are retried: each says the create
-// can safely be repeated (the platform switch is off, or the feed store could
-// not be read or written). A 503 from anything in front of the API may follow a
-// create that went through, so one without these codes is not retried.
-const RETRYABLE_CREATE_CODES = new Set([
-  "data_feeds_unavailable",
-  "feeds_uncountable",
-  "feed_store_unavailable",
-]);
+// The API's own create 503s, and only those, are retried: nothing was written
+// (the platform switch is off, or live feeds cannot be counted). A 503 from
+// anything in front of the API may follow a create that went through, so one
+// without these codes is not retried.
+const RETRYABLE_CREATE_CODES = new Set(["data_feeds_unavailable", "feeds_uncountable"]);
+// A failed record write is retried once only: its write may have landed, and
+// that record counts toward the live-feed limit until it is dropped as unwatched.
+const STORE_UNAVAILABLE_CODE = "feed_store_unavailable";
 // Older servers wrote the uncountable 503 as a bare `{"detail"}` with no code;
 // only for them is this exact sentence matched.
 const LEGACY_UNCOUNTABLE_DETAIL = "Your live feeds cannot be counted right now. Try again shortly.";
@@ -71,7 +70,9 @@ const LEGACY_SCOPE_TOO_LARGE =
   /^This key covers \d+ machines and a feed carries at most \d+\. Pass `machines` with a subset\.$/;
 const scopeTooLarge = (err: FeedHttpError) =>
   err.status === 400 &&
-  (err.code === SCOPE_TOO_LARGE_CODE || LEGACY_SCOPE_TOO_LARGE.test(err.detail ?? ""));
+  (err.code === SCOPE_TOO_LARGE_CODE ||
+    ((err.code === undefined || err.code === "invalid") &&
+      LEGACY_SCOPE_TOO_LARGE.test(err.detail ?? "")));
 
 const FEED_LIMIT_REACHED_CODE = "feed_limit_reached";
 
@@ -137,9 +138,8 @@ export async function listMachines(options: KeyOptions): Promise<MachineScope> {
 
 /**
  * Create a feed with the `sb_live_` API key. Server-side only. The API's own
- * `503` (codes `data_feeds_unavailable`, `feeds_uncountable` and
- * `feed_store_unavailable`) is retried a few times with backoff before it is
- * thrown. A refusal for scope throws `FeedScopeTooLargeError`, one at the
+ * `503` (codes `data_feeds_unavailable` and `feeds_uncountable`) is retried a
+ * few times with backoff before it is thrown, and `feed_store_unavailable` once. A refusal for scope throws `FeedScopeTooLargeError`, one at the
  * live-feed ceiling `FeedLimitReachedError`.
  */
 export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
@@ -154,14 +154,31 @@ export async function createFeed(options: CreateOptions): Promise<CreatedFeed> {
   // No `machines` field at all means "everything in this key's scope".
   const body = { ...(machines ? { machines } : {}), transport: options.transport ?? "sdk" };
   let created: unknown;
+  let storeFailure: FeedHttpError | undefined;
+  const retryable = (err: FeedHttpError) => {
+    if (err.status !== 503 || err.code !== STORE_UNAVAILABLE_CODE) return refusedBeforeWrite(err);
+    const first = storeFailure === undefined;
+    storeFailure ??= err;
+    return first;
+  };
   try {
     created = await withRetry(
       () => request<unknown>(fetchImpl, feedUrl(baseUrl), "POST", options.apiKey, body),
-      refusedBeforeWrite,
+      retryable,
       options.signal,
     );
   } catch (err) {
-    throw typedCreateError(err, machines);
+    const typed = typedCreateError(err, machines);
+    // The limit may be this call's own record, written before the store failed.
+    if (storeFailure && typed instanceof FeedLimitReachedError) {
+      throw new FeedHttpError(
+        503,
+        "The feed store failed during the create, and a feed it may have left counts toward the live-feed limit. Try again in a couple of minutes.",
+        storeFailure.retryAfter,
+        STORE_UNAVAILABLE_CODE,
+      );
+    }
+    throw typed;
   }
   const problem = createdProblem(created);
   if (problem) {

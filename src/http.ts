@@ -32,9 +32,10 @@ export class FeedError extends Error {
  */
 export function redactedError(err: unknown, prefix?: string): FeedError {
   if (err instanceof FeedHttpError) {
-    // Built from redacted parts already: kept typed, so its `code` still reaches the caller.
-    const copy = new FeedHttpError(err.status, err.detail, err.retryAfter, err.code);
-    if (prefix) copy.message = `${prefix}: ${copy.message}`;
+    // Kept typed, subclass included, so its `code` still reaches the caller.
+    const copy: FeedHttpError = Object.assign(Object.create(Object.getPrototypeOf(err)), err);
+    copy.message = redact(prefix ? `${prefix}: ${err.message}` : err.message);
+    copy.stack = err.stack && redact(err.stack);
     return copy;
   }
   const message = err instanceof Error ? err.message : String(err);
@@ -245,7 +246,8 @@ export async function request<T>(
     text = await boundedText(response);
   } catch (err) {
     // A custom fetch may put the request, bearer credential included, in its error.
-    throw redactedError(err, "request failed");
+    // One a custom fetch throws is a failed request, not an answer from the API.
+    throw redactedError(err instanceof FeedHttpError ? err.message : err, "request failed");
   }
   let parsed: unknown = undefined;
   if (text) {

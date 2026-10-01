@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFeed } from "../src/create.js";
 import { attachFeed } from "../src/feed.js";
 import {
+  FeedError,
   FeedHttpError,
   FeedLimitReachedError,
   FeedScopeTooLargeError,
@@ -22,6 +23,7 @@ import {
   FEED_ID,
   FEED_TOKEN,
   MACHINE_A,
+  jwt,
   reworded,
 } from "./fixtures/api.js";
 import { fakeApi, flush, json } from "./helpers.js";
@@ -86,6 +88,46 @@ describe.each([
       });
       expect(api.count("create")).toBe(1);
     }
+  });
+
+  it("retries a create's feed_store_unavailable once only", async () => {
+    const api = fakeApi();
+    const store = () => json(503, shape(ERRORS.createUnavailable));
+    api.queue("create", store(), store(), json(201, CREATED_SSE));
+    const pending = create(api);
+    await vi.advanceTimersByTimeAsync(1_000 + 2_000);
+    expect(await pending).toMatchObject({ status: 503, code: "feed_store_unavailable" });
+    expect(api.count("create")).toBe(2);
+  });
+
+  it("keeps the normal attempts for the other codes after a store failure", async () => {
+    const api = fakeApi();
+    api.queue(
+      "create",
+      json(503, shape(ERRORS.createUnavailable)),
+      json(503, shape(ERRORS.uncountable)),
+      json(201, CREATED_SSE),
+    );
+    const pending = create(api);
+    await vi.advanceTimersByTimeAsync(1_000 + 2_000);
+    expect(await pending).toEqual(CREATED_SSE);
+    expect(api.count("create")).toBe(3);
+  });
+
+  it("surfaces the store failure, not the limit its own record may have reached", async () => {
+    const api = fakeApi();
+    api.queue(
+      "create",
+      json(503, shape(ERRORS.createUnavailable)),
+      json(400, shape(ERRORS.feedCap)),
+    );
+    const pending = create(api);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await pending;
+    expect((error as Error).constructor).toBe(FeedHttpError);
+    expect(error).toMatchObject({ status: 503, code: "feed_store_unavailable" });
+    expect((error as Error).message).toMatch(/feed store failed.*couple of minutes/);
+    expect(api.count("create")).toBe(2);
   });
 
   it.each([
@@ -183,6 +225,21 @@ describe("older servers, which sent no specific code for some errors", () => {
     expect(await create(api)).toMatchObject({ name: "FeedScopeTooLargeError", code: "invalid" });
   });
 
+  it.each([
+    ["feed_limit_reached", FeedLimitReachedError],
+    ["invalid_choice", FeedHttpError],
+  ] as const)("does not read the over-scope sentence under %s", async (code, type) => {
+    const api = fakeApi();
+    const detail = ERRORS.scopeTooLarge.errors[0]!.detail;
+    api.queue(
+      "create",
+      json(400, { ...ERRORS.scopeTooLarge, errors: [{ code, detail, attr: null }] }),
+    );
+    const error = await create(api);
+    expect((error as Error).constructor).toBe(type);
+    expect(error).toMatchObject({ code });
+  });
+
   it("leaves their live-feed-ceiling 400 a plain FeedHttpError", async () => {
     const api = fakeApi();
     api.queue(
@@ -206,6 +263,31 @@ describe("older servers, which sent no specific code for some errors", () => {
 });
 
 describe("redactedError", () => {
+  it("keeps the subclass, and redacts the prefix too", () => {
+    for (const answer of [
+      new FeedScopeTooLargeError("Too many.", "scope_too_large"),
+      new FeedLimitReachedError("At the limit.", "feed_limit_reached"),
+    ]) {
+      const error = redactedError(answer, `with ${API_KEY}`);
+      expect(error.constructor).toBe(answer.constructor);
+      expect(error).toMatchObject({ name: answer.name, code: answer.code, detail: answer.detail });
+      expect(error.message).toBe(`with [redacted]: ${answer.message}`);
+    }
+  });
+
+  it("treats a FeedHttpError thrown by a custom fetch as a failed request", async () => {
+    const thrown = new FeedHttpError(500, "from the fetch", undefined, "boom");
+    const error = await createFeed({
+      apiKey: API_KEY,
+      baseUrl: BASE_URL,
+      fetch: () => Promise.reject(thrown),
+    }).catch((e: unknown) => e);
+    expect((error as Error).constructor).toBe(FeedError);
+    expect((error as Error).message).toBe(
+      "request failed: Scorbit API answered 500: from the fetch",
+    );
+  });
+
   it("keeps an API answer typed, code and all, with or without a prefix", () => {
     const answer = new FeedHttpError(503, "Down.", 5, "feed_store_unavailable");
     for (const [prefix, message] of [
@@ -223,5 +305,42 @@ describe("redactedError", () => {
         code: "feed_store_unavailable",
       });
     }
+  });
+});
+
+describe("redaction of API answers", () => {
+  const SECRETS = [API_KEY, FEED_TOKEN, jwt("leak")];
+  const leaky = {
+    message: `key ${SECRETS.join(" ")}`,
+    type: "client_error",
+    errors: [{ code: `code_${SECRETS.join("_")}`, detail: `key ${SECRETS.join(" ")}`, attr: null }],
+  };
+  const clean = (error: unknown) => {
+    const { message, detail, code } = error as FeedHttpError;
+    const text = JSON.stringify({ message, detail, code });
+    for (const secret of SECRETS) expect(text).not.toContain(secret);
+    expect(text).toContain("[redacted]");
+  };
+
+  it("strips credentials from a heartbeat error event and from ended.error", async () => {
+    const api = fakeApi();
+    api.queue("heartbeat", json(503, leaky), json(403, leaky));
+    const feed = attach(api);
+    const errors: Error[] = [];
+    const ended: { error?: FeedHttpError }[] = [];
+    feed.on("error", (e) => errors.push(e));
+    feed.on("ended", (e) => ended.push(e));
+    feed.start();
+    await flush();
+    clean(errors[0]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(ended).toHaveLength(1);
+    clean(ended[0]!.error);
+  });
+
+  it("strips credentials from a thrown create error", async () => {
+    const api = fakeApi();
+    api.queue("create", json(400, leaky));
+    clean(await create(api));
   });
 });
