@@ -52,13 +52,14 @@ export function sseTransport(fetchImpl: FetchLike) {
         return;
       }
       // Only this connection's channel, or the server-side subscription's (no channel), as for pub.
-      // Codes from 2500 ask for a resubscribe, not an end; any other value counts as an unsubscribe.
+      // Codes from 2500 ask for a resubscribe, which this transport can only do by reconnecting;
+      // any other value counts as an unsubscribe.
       if (push?.unsubscribe) {
         if (push.channel !== undefined && push.channel !== conn.channel) return;
         const { code } = push.unsubscribe;
-        if (typeof code === "number" && code >= 2500) return;
         close();
-        hooks.unsubscribed();
+        if (typeof code === "number" && code >= 2500) hooks.disconnected();
+        else hooks.unsubscribed();
         return;
       }
       if (push?.connect) hooks.live();

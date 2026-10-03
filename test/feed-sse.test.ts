@@ -549,17 +549,28 @@ describe("sse transport: disconnects and failures", () => {
     expect(ended).toEqual(["ended"]);
   });
 
-  it.each([2500, 2502])("ignores an unsubscribe push with resubscribe code %i", async (code) => {
-    const { api, feed, updates } = setup();
-    const stream = queueStream(api);
-    feed.start();
-    await flush();
-    stream.push(CONNECT_FRAME + unsubscribeFrame(undefined, { code }) + pubFrame(UPDATE));
-    await flush();
-    expect(feed.status).toBe("live");
-    expect(updates).toHaveLength(1);
-    expect(api.count("heartbeat")).toBe(0);
-  });
+  it.each([2500, 2502])(
+    "reconnects on an unsubscribe push with resubscribe code %i",
+    async (code) => {
+      const { api, feed, statuses, ended, updates } = setup();
+      const streams = [queueStream(api), queueStream(api)];
+      api.queue("heartbeat", json(200, heartbeatSse(2)));
+      feed.start();
+      await flush();
+      streams[0]!.push(CONNECT_FRAME + unsubscribeFrame(undefined, { code }) + pubFrame(UPDATE));
+      await flush();
+      expect(streams[0]!.aborted).toBe(true);
+      expect(feed.status).toBe("reconnecting");
+      expect(updates).toEqual([]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      streams[1]!.push(CONNECT_FRAME);
+      await flush();
+      expect(api.count("sse")).toBe(2);
+      expect(feed.status).toBe("live");
+      expect(ended).toEqual([]);
+      expect(statuses).toEqual(["connecting", "live", "reconnecting", "live"]);
+    },
+  );
 
   it("ignores an unsubscribe push after stop", async () => {
     const { api, feed, statuses } = setup();
