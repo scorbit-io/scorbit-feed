@@ -28,6 +28,16 @@ All notable changes to this project are documented here. The format follows
   `AbortSignal` stops a create's or a delete's retries. Errors read the API's
   standardized error bodies, `code` included. README documents every status per
   call.
+- Errors are matched by the API's stable error code, never its message: a
+  create `503` is retried for `data_feeds_unavailable` and
+  `feeds_uncountable`, and once for `feed_store_unavailable`, whose write may
+  have landed (a limit reached after it is reported as that store failure); `scope_too_large` throws
+  `FeedScopeTooLargeError` and `feed_limit_reached` the new
+  `FeedLimitReachedError`. Every `FeedHttpError` carries its `code`, the
+  heartbeat's `error` events included, and the `ended` event carries the
+  answer that ended the feed as `error`. The agent logs the code with the
+  message when a feed ends. Older servers' uncountable `503` and over-scope
+  `400`, which had no specific code, are still recognised by their text.
 - A throwing event listener cannot break the feed's lifecycle.
 - Scoped API keys: `listMachines` (and `scorbit-feed machines`) lists what a key
   covers, with each machine's venue; `machines` is optional on create and
