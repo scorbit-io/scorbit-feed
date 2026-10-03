@@ -42,12 +42,24 @@ export function sseTransport(fetchImpl: FetchLike) {
         channel?: unknown;
         connect?: unknown;
         disconnect?: { code?: unknown };
+        unsubscribe?: { code?: unknown };
         pub?: { data?: unknown };
       } | null;
       if (push?.disconnect) {
         close();
         const { code } = push.disconnect;
         hooks.disconnected(typeof code === "number" ? code : undefined);
+        return;
+      }
+      // Only this connection's channel, or the server-side subscription's (no channel), as for pub.
+      // Codes from 2500 ask for a resubscribe, which this transport can only do by reconnecting;
+      // any other value counts as an unsubscribe.
+      if (push?.unsubscribe) {
+        if (push.channel !== undefined && push.channel !== conn.channel) return;
+        const { code } = push.unsubscribe;
+        close();
+        if (typeof code === "number" && code >= 2500) hooks.disconnected();
+        else hooks.unsubscribed();
         return;
       }
       if (push?.connect) hooks.live();

@@ -264,15 +264,24 @@ export class Feed extends Emitter<FeedEvents> {
     this.schedule(Math.max(jittered(this.refreshAttempts), retryAfterMs));
   }
 
-  /** The connection dropped. Reopen at once only after a stable session; otherwise back off. */
-  private dropped(code: number | undefined, error?: Error): void {
+  /**
+   * The connection dropped. Reopen at once only after a stable session; otherwise back off.
+   * A server unsubscribe may mean the feed is over: the heartbeat asks at once, but only
+   * the first since a stable session, so one that keeps recurring backs off like any drop.
+   */
+  private dropped(code: number | undefined, error?: Error, unsubscribed = false): void {
     if (error && !this.emitAlive("error", error)) return;
     if (!this.setStatus("reconnecting")) return;
     const stable = this.liveSince !== undefined && Date.now() - this.liveSince >= STABLE_MS;
     this.liveSince = undefined;
     if (stable) this.dropAttempts = 0;
     this.reopenPending = true;
-    if (!reconnectable(code)) {
+    if (unsubscribed && this.dropAttempts === 0) {
+      this.dropAttempts = 1;
+      // One in flight may carry tokens issued before the unsubscribe: ask once more after it.
+      if (this.inflight) void this.inflight.then(() => this.refresh());
+      else void this.refresh();
+    } else if (!reconnectable(code)) {
       // The server said not to reconnect: back off hard, and let the heartbeat settle whether the feed is over.
       this.dropAttempts += 1;
       this.schedule(jitter(RETRY_MAX_MS));
@@ -399,6 +408,7 @@ export class Feed extends Emitter<FeedEvents> {
         this.setStatus("reconnecting");
       },
       disconnected: (code) => this.dropped(code),
+      unsubscribed: () => this.dropped(undefined, undefined, true),
       lost: (error) => this.dropped(undefined, error),
       error: (error) => this.emitAlive("error", redactedError(error)),
       latest: () => {

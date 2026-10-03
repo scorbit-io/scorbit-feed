@@ -12,6 +12,8 @@ import type { Session, Transport, TransportHooks } from "./types.js";
 type TokenKind = "connectionToken" | "subscriptionToken";
 
 const TOKEN_ERRORS = new Set(["connectToken", "refreshToken"]);
+// Centrifugo's server unsubscribe code; the SDK exports no constant for it.
+const SERVER_UNSUBSCRIBE = 2000;
 
 /**
  * The sdk transport: the official Centrifugo SDK over a bidirectional WebSocket, with
@@ -66,11 +68,11 @@ export function sdkTransport(websocket?: unknown) {
       });
       const conn = { client, active: true, endpoint: session.endpoint, channel: session.channel };
       current = conn;
-      const drop = (code: number) => {
+      const drop = (report: () => void) => {
         conn.active = false;
         client.disconnect();
         current = null;
-        hooks.disconnected(code);
+        report();
       };
 
       client.on("connecting", (ctx) => {
@@ -79,7 +81,7 @@ export function sdkTransport(websocket?: unknown) {
       // `disconnected` means the SDK will not reconnect by itself: the server
       // sent a no-reconnect code, or getToken said the feed is over.
       client.on("disconnected", (ctx) => {
-        if (conn.active) drop(ctx.code);
+        if (conn.active) drop(() => hooks.disconnected(ctx.code));
       });
       client.on("error", (ctx) => {
         // Token errors come from our own getToken, and the feed has reported those already.
@@ -103,7 +105,10 @@ export function sdkTransport(websocket?: unknown) {
       });
       // The SDK resubscribes by itself where it can; `unsubscribed` from the server is final.
       sub.on("unsubscribed", (ctx) => {
-        if (conn.active && ctx.code !== unsubscribedCodes.unsubscribeCalled) drop(ctx.code);
+        if (!conn.active || ctx.code === unsubscribedCodes.unsubscribeCalled) return;
+        drop(() =>
+          ctx.code === SERVER_UNSUBSCRIBE ? hooks.unsubscribed() : hooks.disconnected(ctx.code),
+        );
       });
       sub.on("publication", (ctx) => {
         if (conn.active) hooks.publication(ctx.data);
