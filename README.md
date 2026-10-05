@@ -9,7 +9,7 @@ integration.
   on `localhost`, for OBS browser sources and other local overlays.
 - **`templates/overlay/`**, a plain HTML/CSS/JS starter overlay for the agent.
 
-> Status: 0.1.0, unreleased. The package is not on npm yet.
+> Status: 0.1.0, the first public release.
 
 ## Install
 
