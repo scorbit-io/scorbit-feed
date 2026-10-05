@@ -22,6 +22,70 @@ exposes the browser subset as the global `ScorbitFeed`: `attachFeed` and its
 types only. `createFeed` and `openFeed` are left out on purpose, because they
 need the API key.
 
+Releases are published to npm by this repository's GitHub Actions workflow, with
+[provenance](https://docs.npmjs.com/generating-provenance-statements);
+`npm audit signatures` verifies an installed copy.
+
+## Getting access
+
+1. **Ask for the capability.** Reach out to your Scorbit contact to add data
+   feeds to your Scorbit account. Feeds cover the machines your account owns or
+   operates.
+2. **Accept the Developer Terms.** In Scorbit Console, open **Account settings →
+   Developer** and accept the
+   [Scorbit Developer Terms](https://scorbit.io/developer-terms-of-use/). When the
+   terms change, existing keys keep working, but you accept the new version
+   before generating another key.
+3. **Generate an API key** on the same page and choose its scope: whole venues,
+   or specific machines (see [Scoped keys](#scoped-keys-discovery-and-following-feeds)).
+   The key is shown once. Store it server-side, like a password.
+
+The Developer page also lists your live feeds, with a **Stop** for each, and
+offers the brand assets. An account runs a limited number of live feeds at once;
+a create beyond it is refused with `FeedLimitReachedError`.
+
+## Branding requirements
+
+The [Developer Terms](https://scorbit.io/developer-terms-of-use/) (section
+"Branding and Attribution") apply to anything that displays feed data, the
+starter overlay included:
+
+- Show **"Scorbit"** or **"Powered by Scorbit"** with the Scorbit logo, at a
+  legible size, on every screen, page or stream that displays data from the feed.
+- Do not remove, obscure or alter the attribution, and do not modify the logo.
+- Do not suggest that Scorbit sponsors, endorses or operates your integration,
+  venue or promotion beyond the fact that it uses the feed.
+
+The terms also govern player information: show it only as the feed delivers it,
+never try to re-identify an anonymous player, keep it no longer than 30 days, and
+stop showing a player who drops out of the feed. Scorbit may vary a requirement
+for a specific integration, in writing only.
+
+The logo files, and how to use them, are in [`assets/brand/`](assets/brand/README.md).
+The [starter overlay](#starter-overlay) already carries the attribution: its slot
+shows `scorbit_lockup-horizontal_multi.svg` (alt text "Powered by Scorbit"),
+whose built-in black strap keeps it legible over video. Keep it visible if you
+build on the overlay.
+
+## Quick start
+
+Show live scores in OBS with the agent and the starter overlay:
+
+```sh
+npm install @scorbit/feed
+
+# What your key covers: uuid, game name and venue, as JSON.
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed machines
+
+# Stream everything in the key's scope and serve the starter overlay.
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed \
+  --static node_modules/@scorbit/feed/templates/overlay
+```
+
+Add `http://127.0.0.1:8787/` as an OBS browser source. Stop the agent with
+Ctrl-C: it deletes the feed it created. To build your own integration instead,
+see [Usage](#usage).
+
 ## Credentials
 
 There are two credentials, and the difference between them matters.
@@ -275,6 +339,19 @@ The end reasons:
 
 Nothing is emitted, and no request or timer runs, after a feed has ended.
 
+Why a feed ends, and what it reports:
+
+| What happened                                                                   | `reason`    | `error.code`              |
+| ------------------------------------------------------------------------------- | ----------- | ------------------------- |
+| Stopped from Console, or deleted with its API key or feed token                 | `ended`     | `feed_not_found`          |
+| Left unwatched past the grace period                                            | `ended`     | `feed_not_found`          |
+| Scorbit switched data feeds off                                                 | `withdrawn` | `data_feeds_switched_off` |
+| The account was suspended, the creating key revoked, or a machine's access lost | `withdrawn` | `feed_withdrawn`          |
+
+When the server ends a feed it unsubscribes the feed's channel, so a connected
+feed learns within seconds (see [Lifecycle](#lifecycle)); the next heartbeat is
+the backstop.
+
 ### URLs
 
 `baseUrl` must be `https://`, and an endpoint `wss://` or `https://`; plain
@@ -285,16 +362,21 @@ Nothing is emitted, and no request or timer runs, after a feed has ended.
 
 ```sh
 # List what the key covers (uuid, game name, venue), as JSON on stdout.
-SCORBIT_API_KEY=sb_live_... npx scorbit-feed machines
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed machines
 
 # Create a feed; the agent deletes it again when it exits.
-SCORBIT_API_KEY=sb_live_... npx scorbit-feed --machines <uuid>,<uuid>
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed --machines <uuid>,<uuid>
 # ...or over everything in the key's scope (a venue-scoped key's feed follows its venues)
-SCORBIT_API_KEY=sb_live_... npx scorbit-feed
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed
 
 # Attach to a feed created elsewhere; the agent never deletes it.
-SCORBIT_FEED_TOKEN=sbf_... npx scorbit-feed --feed-id f_...
+SCORBIT_FEED_TOKEN=sbf_... npx @scorbit/feed --feed-id f_...
 ```
+
+Run it as `npx @scorbit/feed`, never `npx scorbit-feed`: without a local
+install, npx resolves the bare name to a different, unrelated package. Once
+`@scorbit/feed` is installed, its `scorbit-feed` command is also on the path of
+`npm run` scripts.
 
 Credentials come from the environment only, never from arguments, and are never
 logged or served.
@@ -346,7 +428,7 @@ added, updated in place and removed as machines join and leave a following feed,
 and a "No machines in this feed yet" line shows while the feed carries none:
 
 ```sh
-SCORBIT_API_KEY=sb_live_... npx scorbit-feed --machines <uuid> \
+SCORBIT_API_KEY=sb_live_... npx @scorbit/feed --machines <uuid> \
   --static node_modules/@scorbit/feed/templates/overlay
 ```
 
@@ -364,17 +446,8 @@ Its connection indicator is a small dot that changes shape as well as colour (a
 ring while connecting, filled when live, a dash once ended), and its state is
 announced to screen readers through a polite live region.
 
-Copy the folder and restyle it freely.
-
-## Branding and attribution
-
-Scorbit's [developer terms](https://scorbit.io/developer-terms-of-use/) require
-visible attribution wherever feed data is displayed. The starter overlay's
-attribution slot shows the Scorbit® logo (alt text "Powered by Scorbit"); keep
-it visible if you build on it. The logo files and how to use them are in
-[`assets/brand/`](assets/brand/README.md); the starter overlay ships one of them,
-`scorbit_lockup-horizontal_multi.svg`, whose built-in black strap keeps it
-legible over video.
+Copy the folder and restyle it freely, keeping its attribution visible (see
+[Branding requirements](#branding-requirements)).
 
 ## Development
 
