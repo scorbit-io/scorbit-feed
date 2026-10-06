@@ -226,12 +226,12 @@ Nothing is emitted, and no request or timer runs, after a feed has ended.
 
 Why a feed ends, and what it reports:
 
-| What happened                                                                   | `reason`    | `error.code`              |
-| ------------------------------------------------------------------------------- | ----------- | ------------------------- |
-| Stopped from Console, or deleted with its API key or feed token                 | `ended`     | `feed_not_found`          |
-| Left unwatched past the grace period                                            | `ended`     | `feed_not_found`          |
-| Scorbit switched data feeds off                                                 | `withdrawn` | `data_feeds_switched_off` |
-| The account was suspended, the creating key revoked, or a machine's access lost | `withdrawn` | `feed_withdrawn`          |
+| What happened                                                                       | `reason`    | `error.code`              |
+| ----------------------------------------------------------------------------------- | ----------- | ------------------------- |
+| Stopped from Console, or deleted with its API key or feed token                     | `ended`     | `feed_not_found`          |
+| Left unwatched past the grace period                                                | `ended`     | `feed_not_found`          |
+| Scorbit switched data feeds off                                                     | `withdrawn` | `data_feeds_switched_off` |
+| The account was suspended, the creating key revoked, or a fixed feed lost a machine | `withdrawn` | `feed_withdrawn`          |
 
 When the server ends a feed it unsubscribes the feed's channel, so a connected feed learns within seconds (see [Lifecycle](#lifecycle)); the next heartbeat is the backstop.
 
